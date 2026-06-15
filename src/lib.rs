@@ -9,5 +9,6 @@ pub mod schema;
 pub mod session;
 pub mod setup;
 pub mod shell;
+pub mod ui;
 
 pub use error::{AshError, Result};
