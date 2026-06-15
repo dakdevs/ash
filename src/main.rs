@@ -1,5 +1,5 @@
 use std::{
-    io::{self, Write},
+    io,
     path::PathBuf,
     process::{Command, Stdio},
 };
@@ -15,6 +15,7 @@ use ash::{
         AshrcEditor, ProviderSetup, default_base_url_for_kind, default_env_for_kind,
         display_provider, doctor_lines,
     },
+    ui::TerminalRenderer,
 };
 use clap::{Args, Parser, Subcommand};
 
@@ -243,23 +244,39 @@ where
     A: ash::agent::Agent,
 {
     let stdin = io::stdin();
-    let mut stdout = io::stdout();
+    let mut renderer = TerminalRenderer::new(io::stdout());
 
     loop {
-        write!(stdout, "{}", session.prompt())?;
-        stdout.flush()?;
+        renderer.render_prompt(&session.prompt())?;
 
         let mut line = String::new();
         if stdin.read_line(&mut line)? == 0 {
             break;
         }
 
-        let response = session.handle_line(&line)?;
+        let input = line.trim_end_matches(['\r', '\n']);
+        let streams_agent_response =
+            session.mode() == PromptMode::Agent && !input.is_empty() && input != "\t";
+
+        let response = if streams_agent_response {
+            renderer.begin_agent_response(&session.status_line())?;
+            let response = session.handle_line_stream(&line, |chunk| {
+                renderer
+                    .stream_agent_chunk(chunk)
+                    .map_err(ash::AshError::from)
+            });
+            renderer.end_agent_response()?;
+            response?
+        } else {
+            let response = session.handle_line(&line)?;
+            renderer.render_response(&response)?;
+            response
+        };
+
         let should_exit = matches!(
             &response,
             SessionResponse::Command(result) if result.should_exit
         );
-        render_response(&response);
 
         if should_exit {
             break;

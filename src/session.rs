@@ -95,6 +95,14 @@ where
     }
 
     pub fn handle_line(&mut self, line: &str) -> Result<SessionResponse> {
+        self.handle_line_stream(line, |_| Ok(()))
+    }
+
+    pub fn handle_line_stream(
+        &mut self,
+        line: &str,
+        on_agent_chunk: impl FnMut(&str) -> Result<()>,
+    ) -> Result<SessionResponse> {
         let input = line.trim_end_matches(['\r', '\n']);
         if input.is_empty() {
             return Ok(SessionResponse::Empty);
@@ -104,14 +112,18 @@ where
         }
 
         match self.mode {
-            PromptMode::Agent => self.handle_agent_prompt(input),
+            PromptMode::Agent => self.handle_agent_prompt(input, on_agent_chunk),
             PromptMode::Command => self.handle_command(input),
         }
     }
 
-    fn handle_agent_prompt(&mut self, input: &str) -> Result<SessionResponse> {
+    fn handle_agent_prompt(
+        &mut self,
+        input: &str,
+        on_agent_chunk: impl FnMut(&str) -> Result<()>,
+    ) -> Result<SessionResponse> {
         self.context.record(ContextEvent::agent_prompt(input))?;
-        let response = self.agent.respond(input)?;
+        let response = self.agent.respond_stream(input, on_agent_chunk)?;
         self.context
             .record(ContextEvent::agent_response(&response))?;
         Ok(SessionResponse::Agent(response))
@@ -133,9 +145,10 @@ where
 #[cfg(test)]
 mod tests {
     use crate::{
-        agent::EchoAgent,
+        agent::{Agent, EchoAgent},
         config::{AshConfig, ModePersistence},
         context::InMemoryContextStore,
+        error::Result,
     };
 
     use super::{AshSession, PromptMode, SessionResponse};
@@ -175,5 +188,44 @@ mod tests {
 
         assert!(matches!(response, SessionResponse::Command(_)));
         assert_eq!(session.mode(), PromptMode::Agent);
+    }
+
+    #[test]
+    fn agent_lines_stream_chunks_before_returning_final_response() {
+        let mut session = AshSession::new(
+            AshConfig::default(),
+            InMemoryContextStore::default(),
+            StreamingAgent,
+            std::env::current_dir().expect("cwd"),
+        );
+        let mut chunks = Vec::new();
+
+        let response = session
+            .handle_line_stream("hello", |chunk| {
+                chunks.push(chunk.to_owned());
+                Ok(())
+            })
+            .expect("agent response");
+
+        assert_eq!(chunks, vec!["agent: ", "hello"]);
+        assert_eq!(response, SessionResponse::Agent("agent: hello".to_owned()));
+    }
+
+    struct StreamingAgent;
+
+    impl Agent for StreamingAgent {
+        fn respond(&mut self, prompt: &str) -> Result<String> {
+            Ok(format!("agent: {prompt}"))
+        }
+
+        fn respond_stream(
+            &mut self,
+            prompt: &str,
+            mut on_chunk: impl FnMut(&str) -> Result<()>,
+        ) -> Result<String> {
+            on_chunk("agent: ")?;
+            on_chunk(prompt)?;
+            Ok(format!("agent: {prompt}"))
+        }
     }
 }
