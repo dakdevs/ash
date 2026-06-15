@@ -584,12 +584,6 @@ fn codex_responses_events(value: &Value) -> Vec<AgentStreamEvent> {
             .map_or_else(Vec::new, |text| {
                 vec![AgentStreamEvent::assistant_text(text)]
             }),
-        Some("response.reasoning_summary_text.delta") => value
-            .get("delta")
-            .and_then(Value::as_str)
-            .map_or_else(Vec::new, |text| {
-                vec![AgentStreamEvent::Status(text.to_owned())]
-            }),
         Some("response.output_item.added") => output_item_added_events(value),
         Some("response.completed" | "response.done") => value
             .get("response")
@@ -601,15 +595,8 @@ fn codex_responses_events(value: &Value) -> Vec<AgentStreamEvent> {
     }
 }
 
-fn output_item_added_events(value: &Value) -> Vec<AgentStreamEvent> {
-    let Some(item) = value.get("item") else {
-        return Vec::new();
-    };
-
-    match item.get("type").and_then(Value::as_str) {
-        Some("reasoning") => vec![AgentStreamEvent::Status("reasoning".to_owned())],
-        _ => Vec::new(),
-    }
+fn output_item_added_events(_value: &Value) -> Vec<AgentStreamEvent> {
+    Vec::new()
 }
 
 fn usage_event(usage: &Value) -> Option<AgentStreamEvent> {
@@ -686,6 +673,33 @@ mod tests {
             ]
         );
         assert_eq!(stream.agent_text(), "hello");
+    }
+
+    #[test]
+    fn codex_responses_sse_does_not_render_reasoning_summary_text() {
+        let mut stream = CodexResponsesSse::default();
+        let mut events = Vec::new();
+        stream
+            .push(
+                concat!(
+                    "event: response.output_item.added\n",
+                    "data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"reasoning\"}}\n\n",
+                    "event: response.reasoning_summary_text.delta\n",
+                    "data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"private thought\"}\n\n",
+                    "event: response.output_text.delta\n",
+                    "data: {\"type\":\"response.output_text.delta\",\"delta\":\"visible answer\"}\n\n",
+                ),
+                |event| {
+                    events.push(event);
+                    Ok(())
+                },
+            )
+            .expect("push sse");
+
+        assert_eq!(
+            events,
+            vec![AgentStreamEvent::AssistantText("visible answer".to_owned())]
+        );
     }
 
     #[test]

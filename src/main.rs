@@ -1,7 +1,10 @@
 use std::{
+    borrow::Cow,
     io,
+    io::IsTerminal,
     path::PathBuf,
     process::{Command, Stdio},
+    sync::{Arc, Mutex},
 };
 
 use anyhow::Context;
@@ -19,6 +22,12 @@ use ash::{
     ui::TerminalRenderer,
 };
 use clap::{Args, Parser, Subcommand};
+use reedline::{
+    EditCommand, Emacs, KeyCode, KeyModifiers, Prompt, PromptEditMode, PromptHistorySearch,
+    Reedline, ReedlineEvent, Signal, Span, Suggestion, default_emacs_keybindings,
+};
+
+const TOGGLE_MODE_COMMAND: &str = "ash.toggle-mode";
 
 #[derive(Debug, Parser)]
 #[command(name = "ash", about = "Agentic Shell")]
@@ -249,6 +258,18 @@ where
     S: ash::context::ContextStore,
     A: ash::agent::Agent,
 {
+    if io::stdin().is_terminal() && io::stdout().is_terminal() {
+        return run_reedline_interactive(session);
+    }
+
+    run_plain_interactive(session)
+}
+
+fn run_plain_interactive<S, A>(session: &mut AshSession<S, A>) -> anyhow::Result<()>
+where
+    S: ash::context::ContextStore,
+    A: ash::agent::Agent,
+{
     let stdin = io::stdin();
     let mut renderer = TerminalRenderer::new(io::stdout());
 
@@ -292,6 +313,282 @@ where
     Ok(())
 }
 
+fn run_reedline_interactive<S, A>(session: &mut AshSession<S, A>) -> anyhow::Result<()>
+where
+    S: ash::context::ContextStore,
+    A: ash::agent::Agent,
+{
+    let mode = Arc::new(Mutex::new(session.mode()));
+    let mut line_editor = ash_line_editor();
+    let prompt = AshPrompt::new(Arc::clone(&mode));
+    let commands = discover_shell_commands();
+    let mut renderer = TerminalRenderer::new(io::stdout());
+
+    loop {
+        set_shared_mode(&mode, session.mode());
+        match line_editor.read_line(&prompt)? {
+            Signal::Success(line) => {
+                let streams_agent_response =
+                    session.mode() == PromptMode::Agent && !line.is_empty();
+                let response = if streams_agent_response {
+                    renderer.begin_agent_response(&session.status_line())?;
+                    let response = session.handle_line_stream(&line, |event| {
+                        renderer
+                            .stream_agent_event(&event)
+                            .map_err(ash::AshError::from)
+                    });
+                    renderer.end_agent_response()?;
+                    response?
+                } else {
+                    let response = session.handle_line(&line)?;
+                    renderer.render_response(&response)?;
+                    response
+                };
+
+                if matches!(
+                    &response,
+                    SessionResponse::Command(result) if result.should_exit
+                ) {
+                    break;
+                }
+            }
+            Signal::HostCommand(command) if command == TOGGLE_MODE_COMMAND => {
+                if line_editor.current_buffer_contents().trim().is_empty() {
+                    let _response = session.toggle_mode()?;
+                    set_shared_mode(&mode, session.mode());
+                } else if session.mode() == PromptMode::Command {
+                    complete_reedline_buffer(&mut line_editor, &commands);
+                }
+            }
+            Signal::CtrlD | Signal::CtrlC => break,
+            _ => {}
+        }
+    }
+
+    Ok(())
+}
+
+fn ash_line_editor() -> Reedline {
+    let mut keybindings = default_emacs_keybindings();
+    keybindings.add_binding(
+        KeyModifiers::NONE,
+        KeyCode::Tab,
+        ReedlineEvent::ExecuteHostCommand(TOGGLE_MODE_COMMAND.to_owned()),
+    );
+
+    Reedline::create().with_edit_mode(Box::new(Emacs::new(keybindings)))
+}
+
+fn set_shared_mode(mode: &Arc<Mutex<PromptMode>>, next: PromptMode) {
+    if let Ok(mut mode) = mode.lock() {
+        *mode = next;
+    }
+}
+
+fn shared_mode(mode: &Arc<Mutex<PromptMode>>) -> PromptMode {
+    mode.lock().map_or(PromptMode::Agent, |mode| *mode)
+}
+
+struct AshPrompt {
+    mode: Arc<Mutex<PromptMode>>,
+}
+
+impl AshPrompt {
+    const fn new(mode: Arc<Mutex<PromptMode>>) -> Self {
+        Self { mode }
+    }
+}
+
+impl Prompt for AshPrompt {
+    fn render_prompt_left(&self) -> Cow<'_, str> {
+        Cow::Borrowed("")
+    }
+
+    fn render_prompt_right(&self) -> Cow<'_, str> {
+        Cow::Borrowed("")
+    }
+
+    fn render_prompt_indicator(&self, _prompt_mode: PromptEditMode) -> Cow<'_, str> {
+        Cow::Owned(format!("{} ", shared_mode(&self.mode).prompt()))
+    }
+
+    fn render_prompt_multiline_indicator(&self) -> Cow<'_, str> {
+        Cow::Borrowed(".. ")
+    }
+
+    fn render_prompt_history_search_indicator(
+        &self,
+        _history_search: PromptHistorySearch,
+    ) -> Cow<'_, str> {
+        Cow::Borrowed("? ")
+    }
+}
+
+fn complete_reedline_buffer(line_editor: &mut Reedline, commands: &[String]) {
+    let buffer = line_editor.current_buffer_contents().to_owned();
+    let pos = line_editor.current_insertion_point();
+    let suggestions = shell_suggestions(&buffer, pos, commands);
+    let Some(replacement) = completion_replacement(&buffer, pos, &suggestions) else {
+        return;
+    };
+
+    let Some(suggestion) = suggestions.first() else {
+        return;
+    };
+    let mut completed = String::new();
+    completed.push_str(&buffer[..suggestion.span.start]);
+    completed.push_str(&replacement);
+    completed.push_str(&buffer[suggestion.span.end..]);
+    if completed != buffer {
+        line_editor.run_edit_commands(&[EditCommand::Clear, EditCommand::InsertString(completed)]);
+    }
+}
+
+fn shell_suggestions(line: &str, pos: usize, commands: &[String]) -> Vec<Suggestion> {
+    let prefix = &line[..pos.min(line.len())];
+    if prefix.trim().is_empty() {
+        return Vec::new();
+    }
+
+    let (start, token) = current_token(prefix);
+    if is_first_token(prefix) && !token.contains('/') {
+        commands
+            .iter()
+            .filter(|command| command.starts_with(token) && command.as_str() != token)
+            .take(80)
+            .map(|command| suggestion(command.clone(), start, pos, true))
+            .collect::<Vec<_>>()
+    } else {
+        path_suggestions(token, start, pos)
+    }
+}
+
+fn completion_replacement(line: &str, pos: usize, suggestions: &[Suggestion]) -> Option<String> {
+    let first = suggestions.first()?;
+    if suggestions.len() == 1 {
+        return Some(first.value.clone());
+    }
+
+    let common = common_prefix(
+        suggestions
+            .iter()
+            .map(|suggestion| suggestion.value.as_str()),
+    );
+    let current = &line[first.span.start..pos.min(line.len())];
+    (common.len() > current.len()).then_some(common)
+}
+
+fn common_prefix<'a>(mut values: impl Iterator<Item = &'a str>) -> String {
+    let Some(first) = values.next() else {
+        return String::new();
+    };
+    let mut prefix = first.to_owned();
+    for value in values {
+        while !value.starts_with(&prefix) {
+            if prefix.is_empty() {
+                return prefix;
+            }
+            prefix.pop();
+        }
+    }
+    prefix
+}
+
+fn current_token(prefix: &str) -> (usize, &str) {
+    let start = prefix
+        .char_indices()
+        .rev()
+        .find_map(|(index, character)| character.is_whitespace().then_some(index + 1))
+        .unwrap_or(0);
+    (start, &prefix[start..])
+}
+
+fn is_first_token(prefix: &str) -> bool {
+    prefix.split_whitespace().count() <= 1
+}
+
+fn path_suggestions(token: &str, start: usize, pos: usize) -> Vec<Suggestion> {
+    let path = std::path::Path::new(token);
+    let (directory, file_prefix) = if token.ends_with('/') {
+        (path, "")
+    } else {
+        (
+            path.parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or_else(|| std::path::Path::new(".")),
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or(""),
+        )
+    };
+
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return Vec::new();
+    };
+
+    let prefix_path = if directory == std::path::Path::new(".") {
+        String::new()
+    } else {
+        format!("{}/", directory.display())
+    };
+
+    let mut suggestions = entries
+        .filter_map(std::result::Result::ok)
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if !name.starts_with(file_prefix) {
+                return None;
+            }
+            let is_dir = entry.file_type().ok().is_some_and(|kind| kind.is_dir());
+            let value = format!("{}{}{}", prefix_path, name, if is_dir { "/" } else { "" });
+            Some(suggestion(value, start, pos, false))
+        })
+        .take(80)
+        .collect::<Vec<_>>();
+    suggestions.sort_by(|left, right| left.value.cmp(&right.value));
+    suggestions
+}
+
+fn suggestion(value: String, start: usize, end: usize, append_whitespace: bool) -> Suggestion {
+    Suggestion {
+        value,
+        span: Span::new(start, end),
+        append_whitespace,
+        ..Suggestion::default()
+    }
+}
+
+fn discover_shell_commands() -> Vec<String> {
+    let mut commands = vec![
+        "cd".to_owned(),
+        "exit".to_owned(),
+        "pwd".to_owned(),
+        "jobs".to_owned(),
+        "fg".to_owned(),
+        "bg".to_owned(),
+    ];
+    if let Some(path) = std::env::var_os("PATH") {
+        for directory in std::env::split_paths(&path) {
+            let Ok(entries) = std::fs::read_dir(directory) else {
+                continue;
+            };
+            commands.extend(
+                entries
+                    .filter_map(std::result::Result::ok)
+                    .filter_map(|entry| {
+                        let file_type = entry.file_type().ok()?;
+                        file_type
+                            .is_file()
+                            .then(|| entry.file_name().to_string_lossy().into_owned())
+                    }),
+            );
+        }
+    }
+    commands.sort();
+    commands.dedup();
+    commands
+}
+
 fn render_response(response: &SessionResponse) {
     match response {
         SessionResponse::Agent(text) => {
@@ -317,5 +614,39 @@ fn default_context_db_path() -> PathBuf {
         PathBuf::from(home).join(".local/share/ash/context.db")
     } else {
         PathBuf::from(".ash-context.db")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{completion_replacement, shell_suggestions};
+
+    #[test]
+    fn command_completion_replaces_the_current_command_token() {
+        let commands = vec!["pwd".to_owned()];
+        let suggestions = shell_suggestions("pw", 2, &commands);
+
+        assert_eq!(
+            completion_replacement("pw", 2, &suggestions),
+            Some("pwd".to_owned())
+        );
+    }
+
+    #[test]
+    fn command_completion_uses_common_prefix_for_multiple_matches() {
+        let commands = vec!["git".to_owned(), "gitk".to_owned()];
+        let suggestions = shell_suggestions("gi", 2, &commands);
+
+        assert_eq!(
+            completion_replacement("gi", 2, &suggestions),
+            Some("git".to_owned())
+        );
+    }
+
+    #[test]
+    fn empty_command_line_has_no_completion_so_tab_can_toggle_modes() {
+        let commands = vec!["pwd".to_owned()];
+
+        assert!(shell_suggestions("", 0, &commands).is_empty());
     }
 }
