@@ -9,6 +9,7 @@ use std::{
 use serde_json::Value;
 
 use crate::{
+    codex_native::CodexSubscriptionProvider,
     error::{AshError, Result},
     stream::{AgentStreamEvent, TokenUsage},
 };
@@ -54,6 +55,7 @@ pub trait Provider {
 
 #[derive(Debug, Clone)]
 pub enum AnyProvider {
+    CodexSubscription(CodexSubscriptionProvider),
     Codex(CodexProvider),
     Unimplemented(UnimplementedProvider),
 }
@@ -61,6 +63,7 @@ pub enum AnyProvider {
 impl Provider for AnyProvider {
     fn complete(&mut self, request: ProviderRequest) -> Result<ProviderResponse> {
         match self {
+            Self::CodexSubscription(provider) => provider.complete(request),
             Self::Codex(provider) => provider.complete(request),
             Self::Unimplemented(provider) => provider.complete(request),
         }
@@ -72,6 +75,7 @@ impl Provider for AnyProvider {
         on_event: impl FnMut(AgentStreamEvent) -> Result<()>,
     ) -> Result<ProviderResponse> {
         match self {
+            Self::CodexSubscription(provider) => provider.complete_stream(request, on_event),
             Self::Codex(provider) => provider.complete_stream(request, on_event),
             Self::Unimplemented(provider) => provider.complete_stream(request, on_event),
         }

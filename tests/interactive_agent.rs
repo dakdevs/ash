@@ -36,6 +36,7 @@ printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens
         .arg("--no-ashrc")
         .arg("--context-db")
         .arg(&context_db)
+        .env("ASH_CODEX_AUTH_FILE", dir.path().join("missing-auth.json"))
         .env("PATH", path_with_fake_codex(dir.path()))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

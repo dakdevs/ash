@@ -11,6 +11,8 @@ anyhow = "=1.0.102"
 clap = { version = "=4.6.1", features = ["derive"] }
 diesel = { version = "=2.3.10", features = ["sqlite"] }
 diesel_migrations = { version = "=2.3.2", features = ["sqlite"] }
+reqwest = { version = "=0.13.4", features = ["blocking", "json", "form"] }
+serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = "=1.0.150"
 thiserror = "=2.0.18"
 

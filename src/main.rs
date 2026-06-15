@@ -7,6 +7,7 @@ use std::{
 use anyhow::Context;
 use ash::{
     agent::ProviderAgent,
+    codex_native::CodexSubscriptionProvider,
     config::AshConfig,
     context::SqliteContextStore,
     providers::{AnyProvider, CodexProvider, UnimplementedProvider},
@@ -121,9 +122,14 @@ fn main() -> anyhow::Result<()> {
 
     let context_path = cli.context_db.unwrap_or_else(default_context_db_path);
     let context = SqliteContextStore::open(context_path).context("failed to open context store")?;
-    let provider = CodexProvider::discover().map_or_else(
-        |_| AnyProvider::Unimplemented(UnimplementedProvider::new("codex")),
-        AnyProvider::Codex,
+    let provider = CodexSubscriptionProvider::discover().map_or_else(
+        |_| {
+            CodexProvider::discover().map_or_else(
+                |_| AnyProvider::Unimplemented(UnimplementedProvider::new("codex")),
+                AnyProvider::Codex,
+            )
+        },
+        AnyProvider::CodexSubscription,
     );
     let agent = ProviderAgent::new(provider);
     let cwd = std::env::current_dir().context("failed to determine current directory")?;
