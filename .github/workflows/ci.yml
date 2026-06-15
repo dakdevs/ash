@@ -23,7 +23,7 @@ jobs:
           fetch-depth: 0
 
       - name: Install Rust
-        run: rustup toolchain install 1.94.1 --profile minimal --component clippy rustfmt
+        run: rustup toolchain install 1.94.1 --profile minimal --component clippy --component rustfmt
 
       - name: Use Rust 1.94.1
         run: rustup default 1.94.1
@@ -46,6 +46,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6.0.3
+        with:
+          fetch-depth: 0
 
       - name: Setup Node
         uses: actions/setup-node@v6.4.0

@@ -24,7 +24,7 @@ jobs:
           ref: ${{ github.event.inputs.tag || github.ref }}
 
       - name: Install Rust
-        run: rustup toolchain install 1.94.1 --profile minimal --component clippy rustfmt
+        run: rustup toolchain install 1.94.1 --profile minimal --component clippy --component rustfmt
 
       - name: Use Rust 1.94.1
         run: rustup default 1.94.1
