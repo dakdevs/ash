@@ -329,14 +329,16 @@ where
     A: ash::agent::Agent,
 {
     let mode = Arc::new(Mutex::new(session.mode()));
+    let status = Arc::new(Mutex::new(session.status_segments()));
     let mut line_editor = ash_line_editor();
-    let prompt = AshPrompt::new(Arc::clone(&mode));
+    let prompt = AshPrompt::new(Arc::clone(&mode), Arc::clone(&status));
     let commands = discover_shell_commands();
     let mut renderer = TerminalRenderer::new(io::stdout());
     let mut next_buffer = None;
 
     loop {
         set_shared_mode(&mode, session.mode());
+        set_shared_status(&status, session.status_segments());
         restore_reedline_buffer(&mut line_editor, &mut next_buffer);
         match line_editor.read_line(&prompt)? {
             Signal::Success(line) => {
@@ -483,17 +485,30 @@ fn set_shared_mode(mode: &Arc<Mutex<PromptMode>>, next: PromptMode) {
     }
 }
 
+fn set_shared_status(status: &Arc<Mutex<String>>, next: String) {
+    if let Ok(mut status) = status.lock() {
+        *status = next;
+    }
+}
+
 fn shared_mode(mode: &Arc<Mutex<PromptMode>>) -> PromptMode {
     mode.lock().map_or(PromptMode::Agent, |mode| *mode)
 }
 
+fn shared_status(status: &Arc<Mutex<String>>) -> String {
+    status
+        .lock()
+        .map_or_else(|_| String::new(), |status| status.clone())
+}
+
 struct AshPrompt {
     mode: Arc<Mutex<PromptMode>>,
+    status: Arc<Mutex<String>>,
 }
 
 impl AshPrompt {
-    const fn new(mode: Arc<Mutex<PromptMode>>) -> Self {
-        Self { mode }
+    const fn new(mode: Arc<Mutex<PromptMode>>, status: Arc<Mutex<String>>) -> Self {
+        Self { mode, status }
     }
 }
 
@@ -503,7 +518,7 @@ impl Prompt for AshPrompt {
     }
 
     fn render_prompt_right(&self) -> Cow<'_, str> {
-        Cow::Borrowed("")
+        Cow::Owned(shared_status(&self.status))
     }
 
     fn render_prompt_indicator(&self, _prompt_mode: PromptEditMode) -> Cow<'_, str> {

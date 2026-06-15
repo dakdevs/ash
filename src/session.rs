@@ -6,6 +6,7 @@ use crate::{
     context::{ContextEvent, ContextStore},
     error::{AshError, Result},
     shell::{ExecutionResult, ShellExecutor},
+    statusline::{StatusLine, StatusLineContext},
     stream::AgentStreamEvent,
 };
 
@@ -53,6 +54,7 @@ where
     context: S,
     agent: A,
     shell: ShellExecutor,
+    statusline: StatusLine,
     mode: PromptMode,
 }
 
@@ -68,6 +70,7 @@ where
             context,
             agent,
             shell: ShellExecutor::new(cwd),
+            statusline: StatusLine::native(),
             mode,
         }
     }
@@ -81,12 +84,15 @@ where
     }
 
     pub fn status_line(&self) -> String {
-        format!(
-            "[ash mode={} provider={} cwd={}]",
-            self.mode.prompt(),
-            self.config.default_provider,
-            self.shell.cwd().display()
-        )
+        format!("[ash {}]", self.status_segments())
+    }
+
+    pub fn status_segments(&self) -> String {
+        self.statusline.render(&StatusLineContext {
+            mode: self.mode,
+            provider: &self.config.default_provider,
+            cwd: self.shell.cwd(),
+        })
     }
 
     pub fn toggle_mode(&mut self) -> Result<SessionResponse> {
@@ -253,6 +259,22 @@ mod tests {
 
         assert!(matches!(response, SessionResponse::Command(_)));
         assert_eq!(session.mode(), PromptMode::Agent);
+    }
+
+    #[test]
+    fn status_line_includes_native_prompt_context() {
+        let cwd = std::env::current_dir().expect("cwd");
+        let session = AshSession::new(
+            AshConfig::default(),
+            InMemoryContextStore::default(),
+            EchoAgent,
+            cwd.clone(),
+        );
+
+        let status = session.status_line();
+
+        assert!(status.starts_with("[ash mode=> provider=codex "));
+        assert!(status.contains(&format!("pwd={}", cwd.display())));
     }
 
     #[test]
