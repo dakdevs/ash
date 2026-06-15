@@ -15,7 +15,7 @@ fn eval_executes_native_command_mode_line() {
         .arg("--mode")
         .arg("command")
         .arg("--eval")
-        .arg("printf ash")
+        .arg("/usr/bin/printf ash")
         .output()
         .expect("run ash");
 

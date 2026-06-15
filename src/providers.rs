@@ -1,5 +1,5 @@
 use std::{
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
 };
 
@@ -53,29 +53,67 @@ pub struct CodexProvider {
 
 impl CodexProvider {
     pub fn discover() -> Result<Self> {
-        let output = Command::new("which")
-            .arg("codex")
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .output()?;
-
-        if !output.status.success() {
-            return Err(AshError::CodexNotFound);
-        }
-
-        let executable = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-        if executable.is_empty() {
-            return Err(AshError::CodexNotFound);
-        }
-
-        Ok(Self {
-            executable: PathBuf::from(executable),
-        })
+        discover_codex_executable().map(Self::new)
     }
 
     #[must_use]
     pub const fn new(executable: PathBuf) -> Self {
         Self { executable }
+    }
+
+    #[must_use]
+    pub fn executable(&self) -> &Path {
+        &self.executable
+    }
+}
+
+fn discover_codex_executable() -> Result<PathBuf> {
+    if let Ok(output) = Command::new("which")
+        .arg("codex")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        && output.status.success()
+    {
+        let executable = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        if !executable.is_empty() {
+            return Ok(PathBuf::from(executable));
+        }
+    }
+
+    common_codex_paths()
+        .into_iter()
+        .find(|path| path.is_file())
+        .ok_or(AshError::CodexNotFound)
+}
+
+fn common_codex_paths() -> Vec<PathBuf> {
+    let mut paths = vec![
+        PathBuf::from("/Applications/Codex.app/Contents/Resources/codex"),
+        PathBuf::from("/usr/local/bin/codex"),
+        PathBuf::from("/opt/homebrew/bin/codex"),
+    ];
+
+    if let Some(home) = std::env::var_os("HOME") {
+        let home = PathBuf::from(home);
+        paths.push(home.join(".local/bin/codex"));
+        paths.push(home.join(".cargo/bin/codex"));
+    }
+
+    paths
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::CodexProvider;
+
+    #[test]
+    fn codex_provider_exposes_executable_path() {
+        let provider = CodexProvider::new(PathBuf::from("/tmp/codex"));
+
+        assert_eq!(provider.executable(), PathBuf::from("/tmp/codex"));
     }
 }
 
