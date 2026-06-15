@@ -260,9 +260,9 @@ where
 
         let response = if streams_agent_response {
             renderer.begin_agent_response(&session.status_line())?;
-            let response = session.handle_line_stream(&line, |chunk| {
+            let response = session.handle_line_stream(&line, |event| {
                 renderer
-                    .stream_agent_chunk(chunk)
+                    .stream_agent_event(&event)
                     .map_err(ash::AshError::from)
             });
             renderer.end_agent_response()?;

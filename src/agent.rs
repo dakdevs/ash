@@ -1,6 +1,7 @@
 use crate::{
     error::Result,
     providers::{Provider, ProviderRequest},
+    stream::AgentStreamEvent,
 };
 
 pub trait Agent {
@@ -9,11 +10,11 @@ pub trait Agent {
     fn respond_stream(
         &mut self,
         prompt: &str,
-        mut on_chunk: impl FnMut(&str) -> Result<()>,
+        mut on_event: impl FnMut(AgentStreamEvent) -> Result<()>,
     ) -> Result<String> {
         let response = self.respond(prompt)?;
         if !response.is_empty() {
-            on_chunk(&response)?;
+            on_event(AgentStreamEvent::assistant_text(&response))?;
         }
 
         Ok(response)
@@ -47,14 +48,14 @@ where
     fn respond_stream(
         &mut self,
         prompt: &str,
-        on_chunk: impl FnMut(&str) -> Result<()>,
+        on_event: impl FnMut(AgentStreamEvent) -> Result<()>,
     ) -> Result<String> {
         let request = ProviderRequest {
             prompt: prompt.to_owned(),
             cwd: std::env::current_dir()?,
         };
         self.provider
-            .complete_stream(request, on_chunk)
+            .complete_stream(request, on_event)
             .map(|response| response.text)
     }
 }
