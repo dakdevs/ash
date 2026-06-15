@@ -1,6 +1,9 @@
 use std::{
+    io::Read,
     path::{Path, PathBuf},
     process::{Command, Stdio},
+    sync::mpsc::{self, Sender},
+    thread,
 };
 
 use crate::error::{AshError, Result};
@@ -29,6 +32,19 @@ pub struct ProviderResponse {
 
 pub trait Provider {
     fn complete(&mut self, request: ProviderRequest) -> Result<ProviderResponse>;
+
+    fn complete_stream(
+        &mut self,
+        request: ProviderRequest,
+        mut on_chunk: impl FnMut(&str) -> Result<()>,
+    ) -> Result<ProviderResponse> {
+        let response = self.complete(request)?;
+        if !response.text.is_empty() {
+            on_chunk(&response.text)?;
+        }
+
+        Ok(response)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -42,6 +58,17 @@ impl Provider for AnyProvider {
         match self {
             Self::Codex(provider) => provider.complete(request),
             Self::Unimplemented(provider) => provider.complete(request),
+        }
+    }
+
+    fn complete_stream(
+        &mut self,
+        request: ProviderRequest,
+        on_chunk: impl FnMut(&str) -> Result<()>,
+    ) -> Result<ProviderResponse> {
+        match self {
+            Self::Codex(provider) => provider.complete_stream(request, on_chunk),
+            Self::Unimplemented(provider) => provider.complete_stream(request, on_chunk),
         }
     }
 }
@@ -105,9 +132,11 @@ fn common_codex_paths() -> Vec<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::{io::Cursor, path::PathBuf};
 
-    use super::{CodexProvider, ProviderRequest, codex_exec_args, codex_response_text};
+    use super::{
+        CodexProvider, ProviderRequest, codex_exec_args, codex_response_text, stream_child_output,
+    };
 
     #[test]
     fn codex_provider_exposes_executable_path() {
@@ -151,25 +180,66 @@ mod tests {
             "Codex authentication needs to be refreshed. Run `ash auth codex`."
         );
     }
+
+    #[test]
+    fn child_stdout_is_streamed_and_collected() {
+        let stdout = Cursor::new(Vec::from("hello ".as_bytes()));
+        let stderr = Cursor::new(Vec::from("diagnostic".as_bytes()));
+        let mut chunks = Vec::new();
+
+        let output = stream_child_output(stdout, stderr, |chunk| {
+            chunks.push(chunk.to_owned());
+            Ok(())
+        })
+        .expect("stream output");
+
+        assert_eq!(chunks, vec!["hello "]);
+        assert_eq!(output.stdout, "hello ");
+        assert_eq!(output.stderr, "diagnostic");
+    }
 }
 
 impl Provider for CodexProvider {
     fn complete(&mut self, request: ProviderRequest) -> Result<ProviderResponse> {
+        self.complete_stream(request, |_| Ok(()))
+    }
+
+    fn complete_stream(
+        &mut self,
+        request: ProviderRequest,
+        mut on_chunk: impl FnMut(&str) -> Result<()>,
+    ) -> Result<ProviderResponse> {
         let args = codex_exec_args(&request);
-        let output = Command::new(&self.executable)
+        let mut child = Command::new(&self.executable)
             .args(&args)
             .stdin(codex_stdin())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .output()
+            .spawn()
             .map_err(|source| AshError::ProcessSpawn {
                 program: self.executable.display().to_string(),
                 source,
             })?;
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let text = codex_response_text(&stdout, &stderr);
+        let stdout = child.stdout.take().ok_or_else(|| AshError::ProcessSpawn {
+            program: self.executable.display().to_string(),
+            source: std::io::Error::other("failed to capture stdout"),
+        })?;
+        let stderr = child.stderr.take().ok_or_else(|| AshError::ProcessSpawn {
+            program: self.executable.display().to_string(),
+            source: std::io::Error::other("failed to capture stderr"),
+        })?;
+
+        let output = stream_child_output(stdout, stderr, &mut on_chunk)?;
+        child.wait().map_err(|source| AshError::ProcessWait {
+            program: self.executable.display().to_string(),
+            source,
+        })?;
+
+        let text = codex_response_text(&output.stdout, &output.stderr);
+        if output.stdout.trim().is_empty() && !text.is_empty() {
+            on_chunk(&text)?;
+        }
 
         Ok(ProviderResponse { text })
     }
@@ -177,6 +247,94 @@ impl Provider for CodexProvider {
 
 fn codex_stdin() -> Stdio {
     Stdio::null()
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct ChildOutput {
+    stdout: String,
+    stderr: String,
+}
+
+#[derive(Debug)]
+enum ChildOutputEvent {
+    Stdout(std::io::Result<String>),
+    Stderr(std::io::Result<String>),
+}
+
+#[derive(Clone, Copy)]
+enum ChildOutputStream {
+    Stdout,
+    Stderr,
+}
+
+impl ChildOutputStream {
+    fn event(self, chunk: std::io::Result<String>) -> ChildOutputEvent {
+        match self {
+            Self::Stdout => ChildOutputEvent::Stdout(chunk),
+            Self::Stderr => ChildOutputEvent::Stderr(chunk),
+        }
+    }
+}
+
+fn stream_child_output(
+    stdout: impl Read + Send + 'static,
+    stderr: impl Read + Send + 'static,
+    mut on_stdout: impl FnMut(&str) -> Result<()>,
+) -> Result<ChildOutput> {
+    let (sender, receiver) = mpsc::channel();
+    let stdout_thread = spawn_output_reader(stdout, ChildOutputStream::Stdout, sender.clone());
+    let stderr_thread = spawn_output_reader(stderr, ChildOutputStream::Stderr, sender);
+
+    let mut output = ChildOutput::default();
+    for event in receiver {
+        match event {
+            ChildOutputEvent::Stdout(Ok(chunk)) => {
+                on_stdout(&chunk)?;
+                output.stdout.push_str(&chunk);
+            }
+            ChildOutputEvent::Stderr(Ok(chunk)) => {
+                output.stderr.push_str(&chunk);
+            }
+            ChildOutputEvent::Stdout(Err(source)) | ChildOutputEvent::Stderr(Err(source)) => {
+                return Err(AshError::Io(source));
+            }
+        }
+    }
+
+    join_output_reader(stdout_thread)?;
+    join_output_reader(stderr_thread)?;
+
+    Ok(output)
+}
+
+fn spawn_output_reader(
+    mut reader: impl Read + Send + 'static,
+    stream: ChildOutputStream,
+    sender: Sender<ChildOutputEvent>,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        let mut buffer = [0_u8; 8192];
+        loop {
+            let event = match reader.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(read) => {
+                    let chunk = String::from_utf8_lossy(&buffer[..read]).into_owned();
+                    stream.event(Ok(chunk))
+                }
+                Err(source) => stream.event(Err(source)),
+            };
+
+            if sender.send(event).is_err() {
+                break;
+            }
+        }
+    })
+}
+
+fn join_output_reader(handle: thread::JoinHandle<()>) -> Result<()> {
+    handle
+        .join()
+        .map_err(|_| AshError::Io(std::io::Error::other("output reader thread panicked")))
 }
 
 fn codex_response_text(stdout: &str, stderr: &str) -> String {
