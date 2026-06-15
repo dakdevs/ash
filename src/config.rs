@@ -1,4 +1,4 @@
-use std::{fs, path::Path};
+use std::{collections::BTreeMap, fs, path::Path};
 
 use crate::{
     error::{AshError, Result},
@@ -31,6 +31,7 @@ pub struct AshConfig {
     pub default_mode: PromptMode,
     pub command_mode: ModePersistence,
     pub default_provider: String,
+    pub providers: BTreeMap<String, AiProviderConfig>,
     pub permissions: PermissionSet,
     pub plugins: Vec<PluginManifest>,
     pub startup_commands: Vec<String>,
@@ -42,11 +43,75 @@ impl Default for AshConfig {
             default_mode: PromptMode::Agent,
             command_mode: ModePersistence::Persistent,
             default_provider: "codex".to_owned(),
+            providers: BTreeMap::new(),
             permissions: PermissionSet::secure_default(),
             plugins: Vec::new(),
             startup_commands: Vec::new(),
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AiProviderConfig {
+    pub name: String,
+    pub kind: String,
+    pub auth: ProviderAuth,
+    pub base_url: Option<String>,
+    pub model: Option<String>,
+}
+
+impl AiProviderConfig {
+    pub fn new(name: impl Into<String>, kind: impl Into<String>, auth: ProviderAuth) -> Self {
+        Self {
+            name: name.into(),
+            kind: kind.into(),
+            auth,
+            base_url: None,
+            model: None,
+        }
+    }
+
+    #[must_use]
+    pub fn as_ashrc_line(&self) -> String {
+        let mut parts = vec![
+            "provider".to_owned(),
+            "add".to_owned(),
+            self.name.clone(),
+            "kind".to_owned(),
+            self.kind.clone(),
+        ];
+
+        match &self.auth {
+            ProviderAuth::None => {}
+            ProviderAuth::Env(variable) => {
+                parts.push("env".to_owned());
+                parts.push(variable.clone());
+            }
+            ProviderAuth::CodexSubscription => {
+                parts.push("auth".to_owned());
+                parts.push("codex-subscription".to_owned());
+            }
+        }
+
+        if let Some(base_url) = &self.base_url {
+            parts.push("base-url".to_owned());
+            parts.push(base_url.clone());
+        }
+
+        if let Some(model) = &self.model {
+            parts.push("model".to_owned());
+            parts.push(model.clone());
+        }
+
+        parts.join(" ")
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProviderAuth {
+    None,
+    Env(String),
+    CodexSubscription,
 }
 
 impl AshConfig {
@@ -98,6 +163,15 @@ impl AshrcEvaluator {
             [command, key, value] if command == "set" => self.set_value(line_number, key, value),
             [command, subcommand, value] if command == "provider" && subcommand == "default" => {
                 self.config.default_provider.clone_from(value);
+                Ok(())
+            }
+            [command, subcommand, name, rest @ ..]
+                if command == "provider" && subcommand == "add" =>
+            {
+                let provider = parse_provider_add(line_number, name, rest)?;
+                self.config
+                    .providers
+                    .insert(provider.name.clone(), provider);
                 Ok(())
             }
             [command, tool, pattern, action] if command == "permission" => {
@@ -152,6 +226,58 @@ impl AshrcEvaluator {
             }),
         }
     }
+}
+
+fn parse_provider_add(
+    line_number: usize,
+    name: &str,
+    tokens: &[String],
+) -> Result<AiProviderConfig> {
+    let mut kind = None;
+    let mut auth = ProviderAuth::None;
+    let mut base_url = None;
+    let mut model = None;
+    let mut index = 0;
+
+    while index < tokens.len() {
+        let key = tokens[index].as_str();
+        let value = tokens.get(index + 1).ok_or_else(|| AshError::AshrcParse {
+            line: line_number,
+            message: format!("provider add `{name}` is missing a value for `{key}`"),
+        })?;
+
+        match key {
+            "kind" => kind = Some(value.clone()),
+            "env" => auth = ProviderAuth::Env(value.clone()),
+            "auth" if value == "codex-subscription" => auth = ProviderAuth::CodexSubscription,
+            "auth" if value == "none" => auth = ProviderAuth::None,
+            "auth" => {
+                return Err(AshError::AshrcParse {
+                    line: line_number,
+                    message: format!("unknown provider auth `{value}`"),
+                });
+            }
+            "base-url" => base_url = Some(value.clone()),
+            "model" => model = Some(value.clone()),
+            other => {
+                return Err(AshError::AshrcParse {
+                    line: line_number,
+                    message: format!("unknown provider field `{other}`"),
+                });
+            }
+        }
+
+        index += 2;
+    }
+
+    let kind = kind.unwrap_or_else(|| name.to_owned());
+    Ok(AiProviderConfig {
+        name: name.to_owned(),
+        kind,
+        auth,
+        base_url,
+        model,
+    })
 }
 
 fn split_words(line: &str) -> std::result::Result<Vec<String>, String> {
@@ -212,6 +338,7 @@ mod tests {
         assert_eq!(config.default_mode, PromptMode::Command);
         assert_eq!(config.command_mode, ModePersistence::OneShot);
         assert_eq!(config.default_provider, "codex");
+        assert!(config.providers.is_empty());
         assert_eq!(
             config.permissions.resolve("bash", "git status --short"),
             PermissionAction::Allow
@@ -224,5 +351,21 @@ mod tests {
             PluginSource::LocalPath(_)
         ));
         assert_eq!(config.startup_commands, vec!["echo startup"]);
+    }
+
+    #[test]
+    fn parses_provider_add_forms() {
+        let config = AshConfig::from_ashrc(
+            "provider add openai kind openai env OPENAI_API_KEY model gpt-5\n",
+        )
+        .expect("config");
+
+        let provider = config.providers.get("openai").expect("openai provider");
+        assert_eq!(provider.kind, "openai");
+        assert_eq!(
+            provider.auth,
+            super::ProviderAuth::Env("OPENAI_API_KEY".to_owned())
+        );
+        assert_eq!(provider.model.as_deref(), Some("gpt-5"));
     }
 }

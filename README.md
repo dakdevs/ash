@@ -93,6 +93,42 @@ permission bash "git status*" allow
 plugin wasm prompt ~/.config/ash/plugins/prompt.wasm ui prompt
 ```
 
+### AI Connector Setup
+
+Common provider setup is available through `ash` commands, so users do not need to hand-edit `.ashrc` for normal connector flows.
+
+Codex subscription:
+
+```sh
+ash auth codex
+ash provider add codex
+ash provider default codex
+```
+
+API-key providers store environment variable references in `.ashrc`, not secret values:
+
+```sh
+export OPENAI_API_KEY="..."
+ash provider add openai
+ash provider add openrouter
+ash provider add anthropic
+ash provider add vercel-ai-gateway
+ash provider default openai
+```
+
+Local providers:
+
+```sh
+ash provider add ollama
+```
+
+Inspect setup:
+
+```sh
+ash provider list
+ash provider doctor
+```
+
 ## Architecture
 
 ASH is split around a small kernel:
