@@ -1,0 +1,135 @@
+name: Agent project worker
+
+on:
+  schedule:
+    - cron: "17 */4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: agent-project-worker
+  cancel-in-progress: false
+
+jobs:
+  work:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Select ready issue
+        id: select
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PROJECT_TOKEN: ${{ secrets.PROJECT_TOKEN }}
+          AGENT_PROJECT_OWNER: ${{ vars.AGENT_PROJECT_OWNER || github.repository_owner }}
+          AGENT_PROJECT_OWNER_TYPE: ${{ vars.AGENT_PROJECT_OWNER_TYPE || 'auto' }}
+          AGENT_PROJECT_NUMBER: ${{ vars.AGENT_PROJECT_NUMBER }}
+          AGENT_PROJECT_STATUS_FIELD: ${{ vars.AGENT_PROJECT_STATUS_FIELD || 'Status' }}
+          AGENT_PROJECT_STATUS_READY: ${{ vars.AGENT_PROJECT_STATUS_READY || 'Ready for Agent' }}
+          AGENT_PROJECT_STATUS_IN_PROGRESS: ${{ vars.AGENT_PROJECT_STATUS_IN_PROGRESS || 'In Progress' }}
+        run: node scripts/github-project-agent.mjs prepare-worker
+
+      - name: Run Codex worker
+        if: steps.select.outputs.selected == 'true'
+        uses: openai/codex-action@v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          prompt-file: .github/codex/prompts/worker.md
+          output-file: .github/codex/runtime/worker-result.json
+          codex-args: '["--output-schema", ".github/codex/schemas/worker-result.schema.json"]'
+          sandbox: workspace-write
+          safety-strategy: drop-sudo
+
+      - name: Apply worker result
+        if: steps.select.outputs.selected == 'true'
+        id: apply
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PROJECT_TOKEN: ${{ secrets.PROJECT_TOKEN }}
+          PROJECT_ITEM_ID: ${{ steps.select.outputs.project_item_id }}
+          ISSUE_NUMBER: ${{ steps.select.outputs.issue_number }}
+          AGENT_PROJECT_OWNER: ${{ vars.AGENT_PROJECT_OWNER || github.repository_owner }}
+          AGENT_PROJECT_OWNER_TYPE: ${{ vars.AGENT_PROJECT_OWNER_TYPE || 'auto' }}
+          AGENT_PROJECT_NUMBER: ${{ vars.AGENT_PROJECT_NUMBER }}
+          AGENT_PROJECT_STATUS_FIELD: ${{ vars.AGENT_PROJECT_STATUS_FIELD || 'Status' }}
+          AGENT_PROJECT_STATUS_CLARIFYING: ${{ vars.AGENT_PROJECT_STATUS_CLARIFYING || 'Clarifying' }}
+          AGENT_PROJECT_STATUS_BLOCKED: ${{ vars.AGENT_PROJECT_STATUS_BLOCKED || 'Blocked' }}
+        run: node scripts/github-project-agent.mjs apply-worker .github/codex/runtime/worker-result.json
+
+      - name: Check for file changes
+        if: steps.apply.outputs.outcome == 'completed'
+        id: changes
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Mark completed run without changes as blocked
+        if: steps.apply.outputs.outcome == 'completed' && steps.changes.outputs.has_changes == 'false'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PROJECT_TOKEN: ${{ secrets.PROJECT_TOKEN }}
+          PROJECT_ITEM_ID: ${{ steps.select.outputs.project_item_id }}
+          ISSUE_NUMBER: ${{ steps.select.outputs.issue_number }}
+          AGENT_PROJECT_OWNER: ${{ vars.AGENT_PROJECT_OWNER || github.repository_owner }}
+          AGENT_PROJECT_OWNER_TYPE: ${{ vars.AGENT_PROJECT_OWNER_TYPE || 'auto' }}
+          AGENT_PROJECT_NUMBER: ${{ vars.AGENT_PROJECT_NUMBER }}
+          AGENT_PROJECT_STATUS_FIELD: ${{ vars.AGENT_PROJECT_STATUS_FIELD || 'Status' }}
+          AGENT_PROJECT_STATUS_BLOCKED: ${{ vars.AGENT_PROJECT_STATUS_BLOCKED || 'Blocked' }}
+        run: node scripts/github-project-agent.mjs fail-no-changes .github/codex/runtime/worker-result.json
+
+      - name: Commit and open draft pull request
+        if: steps.apply.outputs.outcome == 'completed' && steps.changes.outputs.has_changes == 'true'
+        id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ steps.select.outputs.branch }}
+          ISSUE_NUMBER: ${{ steps.select.outputs.issue_number }}
+          PR_TITLE: ${{ steps.apply.outputs.pr_title }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$BRANCH"
+          git add --all
+          git commit -m "Work issue #$ISSUE_NUMBER"
+          git push --set-upstream origin "$BRANCH"
+          pr_url="$(gh pr create --draft --title "$PR_TITLE" --body-file .github/codex/runtime/pr-body.md --head "$BRANCH")"
+          echo "url=$pr_url" >> "$GITHUB_OUTPUT"
+
+      - name: Finalize project state
+        if: steps.pr.outputs.url != ''
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PROJECT_TOKEN: ${{ secrets.PROJECT_TOKEN }}
+          PROJECT_ITEM_ID: ${{ steps.select.outputs.project_item_id }}
+          ISSUE_NUMBER: ${{ steps.select.outputs.issue_number }}
+          PR_URL: ${{ steps.pr.outputs.url }}
+          AGENT_PROJECT_OWNER: ${{ vars.AGENT_PROJECT_OWNER || github.repository_owner }}
+          AGENT_PROJECT_OWNER_TYPE: ${{ vars.AGENT_PROJECT_OWNER_TYPE || 'auto' }}
+          AGENT_PROJECT_NUMBER: ${{ vars.AGENT_PROJECT_NUMBER }}
+          AGENT_PROJECT_STATUS_FIELD: ${{ vars.AGENT_PROJECT_STATUS_FIELD || 'Status' }}
+          AGENT_PROJECT_STATUS_PR_OPEN: ${{ vars.AGENT_PROJECT_STATUS_PR_OPEN || 'PR Open' }}
+        run: node scripts/github-project-agent.mjs finalize-pr .github/codex/runtime/worker-result.json
+
+      - name: Mark failed run as blocked
+        if: failure() && steps.select.outputs.selected == 'true'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PROJECT_TOKEN: ${{ secrets.PROJECT_TOKEN }}
+          PROJECT_ITEM_ID: ${{ steps.select.outputs.project_item_id }}
+          ISSUE_NUMBER: ${{ steps.select.outputs.issue_number }}
+          AGENT_PROJECT_OWNER: ${{ vars.AGENT_PROJECT_OWNER || github.repository_owner }}
+          AGENT_PROJECT_OWNER_TYPE: ${{ vars.AGENT_PROJECT_OWNER_TYPE || 'auto' }}
+          AGENT_PROJECT_NUMBER: ${{ vars.AGENT_PROJECT_NUMBER }}
+          AGENT_PROJECT_STATUS_FIELD: ${{ vars.AGENT_PROJECT_STATUS_FIELD || 'Status' }}
+          AGENT_PROJECT_STATUS_BLOCKED: ${{ vars.AGENT_PROJECT_STATUS_BLOCKED || 'Blocked' }}
+        run: node scripts/github-project-agent.mjs fail-run

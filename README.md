@@ -134,6 +134,8 @@ Add a changeset for user-visible changes:
 npm run changeset
 ```
 
+Agentic GitHub Project automation is documented in [docs/agentic-github-workflow.md](docs/agentic-github-workflow.md).
+
 ## Releases
 
 ASH uses Changesets for version/changelog PRs and GitHub Actions for release artifacts.

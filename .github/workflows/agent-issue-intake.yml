@@ -1,0 +1,64 @@
+name: Agent issue intake
+
+on:
+  issues:
+    types: [opened, edited, reopened]
+  issue_comment:
+    types: [created, edited]
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: agent-intake-${{ github.event.issue.number || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  intake:
+    if: github.actor != 'github-actions[bot]' && github.actor != 'dependabot[bot]'
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Prepare issue context
+        id: prepare
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PROJECT_TOKEN: ${{ secrets.PROJECT_TOKEN }}
+          AGENT_PROJECT_OWNER: ${{ vars.AGENT_PROJECT_OWNER || github.repository_owner }}
+          AGENT_PROJECT_OWNER_TYPE: ${{ vars.AGENT_PROJECT_OWNER_TYPE || 'auto' }}
+          AGENT_PROJECT_NUMBER: ${{ vars.AGENT_PROJECT_NUMBER }}
+          AGENT_PROJECT_STATUS_FIELD: ${{ vars.AGENT_PROJECT_STATUS_FIELD || 'Status' }}
+          AGENT_PROJECT_STATUS_CLARIFYING: ${{ vars.AGENT_PROJECT_STATUS_CLARIFYING || 'Clarifying' }}
+        run: node scripts/github-project-agent.mjs prepare-intake
+
+      - name: Run Codex intake
+        if: steps.prepare.outputs.run_codex == 'true'
+        uses: openai/codex-action@v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          prompt-file: .github/codex/prompts/intake.md
+          output-file: .github/codex/runtime/intake-result.json
+          codex-args: '["--output-schema", ".github/codex/schemas/intake-result.schema.json"]'
+          sandbox: read-only
+          safety-strategy: drop-sudo
+
+      - name: Apply intake decision
+        if: steps.prepare.outputs.run_codex == 'true'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PROJECT_TOKEN: ${{ secrets.PROJECT_TOKEN }}
+          PROJECT_ITEM_ID: ${{ steps.prepare.outputs.project_item_id }}
+          ISSUE_NUMBER: ${{ steps.prepare.outputs.issue_number }}
+          AGENT_PROJECT_OWNER: ${{ vars.AGENT_PROJECT_OWNER || github.repository_owner }}
+          AGENT_PROJECT_OWNER_TYPE: ${{ vars.AGENT_PROJECT_OWNER_TYPE || 'auto' }}
+          AGENT_PROJECT_NUMBER: ${{ vars.AGENT_PROJECT_NUMBER }}
+          AGENT_PROJECT_STATUS_FIELD: ${{ vars.AGENT_PROJECT_STATUS_FIELD || 'Status' }}
+          AGENT_PROJECT_STATUS_CLARIFYING: ${{ vars.AGENT_PROJECT_STATUS_CLARIFYING || 'Clarifying' }}
+          AGENT_PROJECT_STATUS_READY: ${{ vars.AGENT_PROJECT_STATUS_READY || 'Ready for Agent' }}
+          AGENT_PROJECT_STATUS_BLOCKED: ${{ vars.AGENT_PROJECT_STATUS_BLOCKED || 'Blocked' }}
+        run: node scripts/github-project-agent.mjs apply-intake .github/codex/runtime/intake-result.json

@@ -1,0 +1,32 @@
+{
+  "type": "object",
+  "properties": {
+    "outcome": {
+      "type": "string",
+      "enum": ["completed", "needs_clarification", "blocked"]
+    },
+    "summary": {
+      "type": "string",
+      "description": "A concise summary of completed work, or why work did not proceed."
+    },
+    "comment": {
+      "type": "string",
+      "description": "A GitHub issue comment to post for clarification or blocked outcomes. Use an empty string when completed."
+    },
+    "tests": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Verification commands run and their result. Mention commands that could not be run."
+    },
+    "risk": {
+      "type": "string",
+      "description": "Residual risk or review notes for the pull request."
+    },
+    "pr_title": {
+      "type": "string",
+      "description": "Draft pull request title to use when outcome is completed."
+    }
+  },
+  "required": ["outcome", "summary", "comment", "tests", "risk", "pr_title"],
+  "additionalProperties": false
+}

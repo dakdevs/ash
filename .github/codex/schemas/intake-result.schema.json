@@ -1,0 +1,23 @@
+{
+  "type": "object",
+  "properties": {
+    "decision": {
+      "type": "string",
+      "enum": ["needs_clarification", "ready", "blocked"]
+    },
+    "comment": {
+      "type": "string",
+      "description": "A GitHub issue comment to post when clarification is needed or the issue is blocked. Use an empty string when ready."
+    },
+    "readiness_summary": {
+      "type": "string",
+      "description": "One or two sentences explaining why the issue is ready or not ready."
+    },
+    "missing_information": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  },
+  "required": ["decision", "comment", "readiness_summary", "missing_information"],
+  "additionalProperties": false
+}
