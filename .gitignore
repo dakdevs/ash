@@ -1,0 +1,10 @@
+/target/
+/node_modules/
+/.ash-context.db
+*.db
+*.sqlite
+*.sqlite3
+.DS_Store
+*.swp
+*.swo
+*.tmp

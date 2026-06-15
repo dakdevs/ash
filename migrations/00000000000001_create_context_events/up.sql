@@ -1,0 +1,6 @@
+CREATE TABLE IF NOT EXISTS context_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+    created_at_ms BIGINT NOT NULL,
+    kind TEXT NOT NULL,
+    body TEXT NOT NULL
+);

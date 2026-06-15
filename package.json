@@ -1,0 +1,24 @@
+{
+  "name": "ash",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Agentic Shell",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/dakdevs/ash.git"
+  },
+  "engines": {
+    "node": "25.9.0",
+    "npm": "11.12.1"
+  },
+  "scripts": {
+    "changeset": "changeset",
+    "version-packages": "changeset version && node scripts/sync-cargo-version.mjs && cargo update --workspace",
+    "release:tag": "node scripts/create-release-tag.mjs"
+  },
+  "devDependencies": {
+    "@changesets/changelog-github": "0.7.0",
+    "@changesets/cli": "2.31.0"
+  }
+}
