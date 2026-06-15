@@ -14,6 +14,7 @@ where
     agent_line_open: bool,
     current_section: Option<AgentSection>,
     style: TerminalStyle,
+    line_ending: &'static str,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -113,7 +114,12 @@ where
             agent_line_open: false,
             current_section: None,
             style,
+            line_ending: "\n",
         }
+    }
+
+    pub fn set_raw_mode_line_endings(&mut self, raw_mode: bool) {
+        self.line_ending = if raw_mode { "\r\n" } else { "\n" };
     }
 
     pub fn render_prompt(&mut self, prompt: &str) -> io::Result<()> {
@@ -125,10 +131,10 @@ where
         self.agent_chunk_ends_with_newline = true;
         self.agent_line_open = false;
         self.current_section = None;
-        writeln!(self.writer)?;
-        writeln!(
+        self.write_newline()?;
+        write!(
             self.writer,
-            "{}{}╭─ {}assistant{} {}{}{}",
+            "{}{}╭─ {}assistant{} {}{}{}{}",
             self.style.paint(StyleRole::Panel),
             self.style.paint(StyleRole::Border),
             self.style.paint(StyleRole::Header),
@@ -136,6 +142,7 @@ where
             self.style.paint(StyleRole::Muted),
             status,
             self.style.paint(StyleRole::Reset),
+            self.line_ending,
         )?;
         self.write_agent_empty_line()?;
         self.writer.flush()
@@ -175,16 +182,17 @@ where
 
     pub fn end_agent_response(&mut self) -> io::Result<()> {
         if self.agent_line_open || !self.agent_chunk_ends_with_newline {
-            writeln!(self.writer)?;
+            self.write_newline()?;
         }
-        writeln!(
+        write!(
             self.writer,
-            "{}{}╰{}",
+            "{}{}╰{}{}",
             self.style.paint(StyleRole::Panel),
             self.style.paint(StyleRole::Border),
             self.style.paint(StyleRole::Reset),
+            self.line_ending,
         )?;
-        writeln!(self.writer)?;
+        self.write_newline()?;
         self.agent_line_open = false;
         self.current_section = None;
         self.writer.flush()
@@ -199,19 +207,52 @@ where
                 write!(self.writer, "{}", result.stderr)?;
                 if printed {
                     if !result.stdout.ends_with('\n') && !result.stderr.ends_with('\n') {
-                        writeln!(self.writer)?;
+                        self.write_newline()?;
                     }
-                    writeln!(self.writer)?;
+                    self.write_newline()?;
                 }
                 self.writer.flush()
             }
             SessionResponse::ModeChanged(mode) => {
-                writeln!(self.writer, "[ash] mode {}", mode.prompt())?;
-                writeln!(self.writer)?;
+                write!(
+                    self.writer,
+                    "[ash] mode {}{}",
+                    mode.prompt(),
+                    self.line_ending
+                )?;
+                self.write_newline()?;
                 self.writer.flush()
             }
             SessionResponse::Empty => Ok(()),
         }
+    }
+
+    pub fn render_cancel_prompt(&mut self) -> io::Result<()> {
+        self.close_open_agent_line()?;
+        self.write_agent_empty_line()?;
+        self.write_agent_prefix()?;
+        write!(
+            self.writer,
+            "{}cancel request? {}Esc/y{} cancel · {}Enter/n{} continue{}{}",
+            self.style.paint(StyleRole::Warning),
+            self.style.paint(StyleRole::Accent),
+            self.style.paint(StyleRole::Warning),
+            self.style.paint(StyleRole::Accent),
+            self.style.paint(StyleRole::Warning),
+            self.style.paint(StyleRole::Reset),
+            self.line_ending,
+        )?;
+        self.writer.flush()
+    }
+
+    pub fn render_agent_cancelled(&mut self, prompt: &str) -> io::Result<()> {
+        self.close_open_agent_line()?;
+        self.begin_section(AgentSection::Thinking)?;
+        self.write_agent_lines(
+            &format!("cancelled · restored prompt: {prompt}"),
+            StyleRole::Warning,
+        )?;
+        self.writer.flush()
     }
 
     fn render_agent_response(&mut self, text: &str) -> io::Result<()> {
@@ -228,15 +269,16 @@ where
         if self.current_section.is_some() {
             self.write_agent_empty_line()?;
         }
-        writeln!(
+        write!(
             self.writer,
-            "{}{}│{} {}{}{}",
+            "{}{}│{} {}{}{}{}",
             self.style.paint(StyleRole::Panel),
             self.style.paint(StyleRole::Border),
             self.style.paint(StyleRole::Reset),
             self.style.paint(section.role()),
             section.label(),
             self.style.paint(StyleRole::Reset),
+            self.line_ending,
         )?;
         self.current_section = Some(section);
         Ok(())
@@ -245,12 +287,13 @@ where
     fn write_agent_lines(&mut self, text: &str, role: StyleRole) -> io::Result<()> {
         for line in text.lines() {
             self.write_agent_prefix()?;
-            writeln!(
+            write!(
                 self.writer,
-                "{}{}{}",
+                "{}{}{}{}",
                 self.style.paint(role),
                 line,
                 self.style.paint(StyleRole::Reset),
+                self.line_ending,
             )?;
         }
 
@@ -278,7 +321,7 @@ where
             )?;
 
             if segment.ends_with('\n') {
-                writeln!(self.writer)?;
+                self.write_newline()?;
                 self.agent_line_open = false;
                 self.agent_chunk_ends_with_newline = true;
             } else {
@@ -291,7 +334,7 @@ where
 
     fn close_open_agent_line(&mut self) -> io::Result<()> {
         if self.agent_line_open {
-            writeln!(self.writer)?;
+            self.write_newline()?;
             self.agent_line_open = false;
             self.agent_chunk_ends_with_newline = true;
         }
@@ -299,12 +342,13 @@ where
     }
 
     fn write_agent_empty_line(&mut self) -> io::Result<()> {
-        writeln!(
+        write!(
             self.writer,
-            "{}{}│{}",
+            "{}{}│{}{}",
             self.style.paint(StyleRole::Panel),
             self.style.paint(StyleRole::Border),
             self.style.paint(StyleRole::Reset),
+            self.line_ending,
         )
     }
 
@@ -317,6 +361,10 @@ where
             self.style.paint(StyleRole::Reset),
             self.style.paint(StyleRole::Panel),
         )
+    }
+
+    fn write_newline(&mut self) -> io::Result<()> {
+        write!(self.writer, "{}", self.line_ending)
     }
 }
 
@@ -405,6 +453,44 @@ mod tests {
         assert_eq!(
             output,
             "\n╭─ assistant [ash]\n│\n│ thinking\n│ started\n│\n│ tool\n│ $ git status --short\n│\n│ output\n│  M src/ui.rs\n│\n│ response\n│ clean\n│\n│ usage\n│ in 12 · out 3 · cached 4 · reasoning 1\n╰\n\n"
+        );
+    }
+
+    #[test]
+    fn agent_cancel_prompt_and_cancelled_state_are_rendered_inside_panel() {
+        let mut output = Vec::new();
+        let mut renderer = TerminalRenderer::plain(&mut output);
+
+        renderer.begin_agent_response("[ash]").expect("begin");
+        renderer.render_cancel_prompt().expect("prompt");
+        renderer
+            .render_agent_cancelled("revise this")
+            .expect("cancelled");
+        renderer.end_agent_response().expect("end");
+
+        let output = String::from_utf8(output).expect("utf8");
+        assert_eq!(
+            output,
+            "\n╭─ assistant [ash]\n│\n│\n│ cancel request? Esc/y cancel · Enter/n continue\n│ thinking\n│ cancelled · restored prompt: revise this\n╰\n\n"
+        );
+    }
+
+    #[test]
+    fn raw_mode_agent_responses_use_crlf_line_endings() {
+        let mut output = Vec::new();
+        let mut renderer = TerminalRenderer::plain(&mut output);
+
+        renderer.set_raw_mode_line_endings(true);
+        renderer.begin_agent_response("[ash]").expect("begin");
+        renderer
+            .stream_agent_event(&AgentStreamEvent::AssistantText("hello".to_owned()))
+            .expect("stream");
+        renderer.end_agent_response().expect("end");
+
+        let output = String::from_utf8(output).expect("utf8");
+        assert_eq!(
+            output,
+            "\r\n╭─ assistant [ash]\r\n│\r\n│ response\r\n│ hello\r\n╰\r\n\r\n"
         );
     }
 }

@@ -102,10 +102,23 @@ where
         self.handle_line_stream(line, |_| Ok(()))
     }
 
+    pub fn handle_line_interactive(&mut self, line: &str) -> Result<SessionResponse> {
+        self.handle_line_with_options(line, |_| Ok(()), CommandExecution::Interactive)
+    }
+
     pub fn handle_line_stream(
         &mut self,
         line: &str,
         on_agent_event: impl FnMut(AgentStreamEvent) -> Result<()>,
+    ) -> Result<SessionResponse> {
+        self.handle_line_with_options(line, on_agent_event, CommandExecution::Captured)
+    }
+
+    fn handle_line_with_options(
+        &mut self,
+        line: &str,
+        on_agent_event: impl FnMut(AgentStreamEvent) -> Result<()>,
+        command_execution: CommandExecution,
     ) -> Result<SessionResponse> {
         let input = line.trim_end_matches(['\r', '\n']);
         if input.is_empty() {
@@ -117,7 +130,7 @@ where
 
         match self.mode {
             PromptMode::Agent => self.handle_agent_prompt(input, on_agent_event),
-            PromptMode::Command => self.handle_command(input),
+            PromptMode::Command => self.handle_command(input, command_execution),
         }
     }
 
@@ -135,9 +148,16 @@ where
         Ok(SessionResponse::Agent(response))
     }
 
-    fn handle_command(&mut self, input: &str) -> Result<SessionResponse> {
+    fn handle_command(
+        &mut self,
+        input: &str,
+        command_execution: CommandExecution,
+    ) -> Result<SessionResponse> {
         self.context.record(ContextEvent::command_input(input))?;
-        let result = self.shell.execute_line(input)?;
+        let result = match command_execution {
+            CommandExecution::Captured => self.shell.execute_line(input)?,
+            CommandExecution::Interactive => self.shell.execute_line_interactive(input)?,
+        };
         self.context.record(ContextEvent::command_result(&result))?;
 
         if self.config.command_mode == ModePersistence::OneShot {
@@ -146,6 +166,12 @@ where
 
         Ok(SessionResponse::Command(result))
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CommandExecution {
+    Captured,
+    Interactive,
 }
 
 fn agent_prompt_with_context(input: &str, events: &[ContextEvent]) -> String {
@@ -230,6 +256,31 @@ mod tests {
     }
 
     #[test]
+    fn interactive_command_mode_does_not_capture_external_output() {
+        let config = AshConfig {
+            default_mode: PromptMode::Command,
+            ..AshConfig::default()
+        };
+        let mut session = AshSession::new(
+            config,
+            InMemoryContextStore::default(),
+            EchoAgent,
+            std::env::current_dir().expect("cwd"),
+        );
+
+        let response = session
+            .handle_line_interactive("/usr/bin/true")
+            .expect("interactive command");
+
+        let SessionResponse::Command(result) = response else {
+            panic!("expected command response");
+        };
+        assert_eq!(result.status, 0);
+        assert!(result.stdout.is_empty());
+        assert!(result.stderr.is_empty());
+    }
+
+    #[test]
     fn agent_lines_stream_chunks_before_returning_final_response() {
         let mut session = AshSession::new(
             AshConfig::default(),
@@ -276,6 +327,28 @@ mod tests {
         assert!(text.contains("<ash_context>"));
         assert!(text.contains("remember that git status was clean"));
         assert!(text.contains("Current user prompt:\nagain"));
+    }
+
+    #[test]
+    fn cancelled_agent_turn_keeps_user_prompt_without_agent_response() {
+        let mut session = AshSession::new(
+            AshConfig::default(),
+            InMemoryContextStore::default(),
+            StreamingAgent,
+            std::env::current_dir().expect("cwd"),
+        );
+
+        let error = session
+            .handle_line_stream("revise this", |_| {
+                Err(crate::error::AshError::AgentCancelled)
+            })
+            .expect_err("cancelled");
+
+        assert!(matches!(error, crate::error::AshError::AgentCancelled));
+        assert_eq!(
+            session.context.events(),
+            &[crate::context::ContextEvent::agent_prompt("revise this")]
+        );
     }
 
     struct StreamingAgent;

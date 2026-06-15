@@ -62,7 +62,13 @@ impl ShellExecutor {
     pub fn execute_line(&mut self, input: &str) -> Result<ExecutionResult> {
         let raw_program = Parser::parse(input)?;
         let program = self.expand(raw_program);
-        self.execute_program(program)
+        self.execute_program(program, ExternalStdio::Captured)
+    }
+
+    pub fn execute_line_interactive(&mut self, input: &str) -> Result<ExecutionResult> {
+        let raw_program = Parser::parse(input)?;
+        let program = self.expand(raw_program);
+        self.execute_program(program, ExternalStdio::Inherited)
     }
 
     fn expand(&self, program: ShellProgram) -> ShellProgram {
@@ -83,13 +89,21 @@ impl ShellExecutor {
         }
     }
 
-    fn execute_program(&mut self, program: ShellProgram) -> Result<ExecutionResult> {
+    fn execute_program(
+        &mut self,
+        program: ShellProgram,
+        external_stdio: ExternalStdio,
+    ) -> Result<ExecutionResult> {
         match program {
-            ShellProgram::Simple(command) => self.execute_simple(command),
+            ShellProgram::Simple(command) => self.execute_simple(command, external_stdio),
         }
     }
 
-    fn execute_simple(&mut self, command: SimpleCommand) -> Result<ExecutionResult> {
+    fn execute_simple(
+        &mut self,
+        command: SimpleCommand,
+        external_stdio: ExternalStdio,
+    ) -> Result<ExecutionResult> {
         if command.words.is_empty() {
             for (key, value) in command.assignments {
                 self.environment.insert(key, value);
@@ -123,7 +137,7 @@ impl ShellExecutor {
                     self.environment.len()
                 )))
             }
-            _ => self.execute_external(command),
+            _ => self.execute_external(command, external_stdio),
         }
     }
 
@@ -170,7 +184,11 @@ impl ShellExecutor {
         ExecutionResult::success(String::new())
     }
 
-    fn execute_external(&self, command: SimpleCommand) -> Result<ExecutionResult> {
+    fn execute_external(
+        &self,
+        command: SimpleCommand,
+        external_stdio: ExternalStdio,
+    ) -> Result<ExecutionResult> {
         let words = command
             .words
             .iter()
@@ -189,6 +207,25 @@ impl ShellExecutor {
             process.env(key, value);
         }
 
+        if external_stdio == ExternalStdio::Inherited {
+            let status = process
+                .stdin(Stdio::inherit())
+                .stdout(Stdio::inherit())
+                .stderr(Stdio::inherit())
+                .status()
+                .map_err(|source| AshError::ProcessSpawn {
+                    program: program.clone(),
+                    source,
+                })?;
+
+            return Ok(ExecutionResult {
+                status: status.code().unwrap_or(1),
+                stdout: String::new(),
+                stderr: String::new(),
+                should_exit: false,
+            });
+        }
+
         let output = process.output().map_err(|source| AshError::ProcessSpawn {
             program: program.clone(),
             source,
@@ -201,6 +238,12 @@ impl ShellExecutor {
             should_exit: false,
         })
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExternalStdio {
+    Captured,
+    Inherited,
 }
 
 #[cfg(test)]
@@ -257,5 +300,18 @@ mod tests {
             .expect("single quoted printf");
 
         assert_eq!(result.stdout, "$NAME");
+    }
+
+    #[test]
+    fn interactive_external_commands_inherit_stdio_without_capturing_output() {
+        let mut executor = ShellExecutor::new(std::env::current_dir().expect("cwd"));
+
+        let result = executor
+            .execute_line_interactive("/usr/bin/true")
+            .expect("true");
+
+        assert_eq!(result.status, 0);
+        assert!(result.stdout.is_empty());
+        assert!(result.stderr.is_empty());
     }
 }

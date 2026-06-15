@@ -28,6 +28,9 @@ pub enum AshError {
     #[error("codex authentication has expired")]
     CodexAuthExpired,
 
+    #[error("agent request was cancelled")]
+    AgentCancelled,
+
     #[error("provider transport error: {0}")]
     ProviderTransport(String),
 

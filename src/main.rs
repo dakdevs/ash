@@ -5,6 +5,7 @@ use std::{
     path::PathBuf,
     process::{Command, Stdio},
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
 use anyhow::Context;
@@ -13,6 +14,7 @@ use ash::{
     codex_native::CodexSubscriptionProvider,
     config::AshConfig,
     context::SqliteContextStore,
+    error::AshError,
     providers::{AnyProvider, CodexProvider, UnimplementedProvider},
     session::{AshSession, PromptMode, SessionResponse},
     setup::{
@@ -22,9 +24,17 @@ use ash::{
     ui::TerminalRenderer,
 };
 use clap::{Args, Parser, Subcommand};
+use crossterm::{
+    event::{
+        self as terminal_event, Event as TerminalEvent, KeyCode as TerminalKeyCode, KeyEvent,
+        KeyEventKind, KeyModifiers as TerminalKeyModifiers,
+    },
+    terminal,
+};
 use reedline::{
-    EditCommand, Emacs, KeyCode, KeyModifiers, Prompt, PromptEditMode, PromptHistorySearch,
-    Reedline, ReedlineEvent, Signal, Span, Suggestion, default_emacs_keybindings,
+    EditCommand, Emacs, KeyCode as ReedlineKeyCode, KeyModifiers as ReedlineKeyModifiers, Prompt,
+    PromptEditMode, PromptHistorySearch, Reedline, ReedlineEvent, Signal, Span, Suggestion,
+    default_emacs_keybindings,
 };
 
 const TOGGLE_MODE_COMMAND: &str = "ash.toggle-mode";
@@ -323,24 +333,44 @@ where
     let prompt = AshPrompt::new(Arc::clone(&mode));
     let commands = discover_shell_commands();
     let mut renderer = TerminalRenderer::new(io::stdout());
+    let mut next_buffer = None;
 
     loop {
         set_shared_mode(&mode, session.mode());
+        restore_reedline_buffer(&mut line_editor, &mut next_buffer);
         match line_editor.read_line(&prompt)? {
             Signal::Success(line) => {
                 let streams_agent_response =
                     session.mode() == PromptMode::Agent && !line.is_empty();
                 let response = if streams_agent_response {
+                    let _raw_mode = RawModeGuard::enable()?;
+                    renderer.set_raw_mode_line_endings(true);
                     renderer.begin_agent_response(&session.status_line())?;
                     let response = session.handle_line_stream(&line, |event| {
+                        poll_agent_escape(&mut renderer)?;
                         renderer
                             .stream_agent_event(&event)
-                            .map_err(ash::AshError::from)
+                            .map_err(AshError::from)?;
+                        poll_agent_escape(&mut renderer)
                     });
+                    let cancelled = matches!(response, Err(AshError::AgentCancelled));
+                    if cancelled {
+                        renderer.render_agent_cancelled(&line)?;
+                        next_buffer = Some(line.clone());
+                    }
                     renderer.end_agent_response()?;
-                    response?
+                    renderer.set_raw_mode_line_endings(false);
+                    match response {
+                        Ok(response) => response,
+                        Err(AshError::AgentCancelled) => continue,
+                        Err(error) => return Err(error.into()),
+                    }
                 } else {
-                    let response = session.handle_line(&line)?;
+                    let response = if session.mode() == PromptMode::Command {
+                        session.handle_line_interactive(&line)?
+                    } else {
+                        session.handle_line(&line)?
+                    };
                     renderer.render_response(&response)?;
                     response
                 };
@@ -371,12 +401,80 @@ where
 fn ash_line_editor() -> Reedline {
     let mut keybindings = default_emacs_keybindings();
     keybindings.add_binding(
-        KeyModifiers::NONE,
-        KeyCode::Tab,
+        ReedlineKeyModifiers::NONE,
+        ReedlineKeyCode::Tab,
         ReedlineEvent::ExecuteHostCommand(TOGGLE_MODE_COMMAND.to_owned()),
     );
 
     Reedline::create().with_edit_mode(Box::new(Emacs::new(keybindings)))
+}
+
+fn restore_reedline_buffer(line_editor: &mut Reedline, next_buffer: &mut Option<String>) {
+    let Some(buffer) = next_buffer.take() else {
+        return;
+    };
+
+    line_editor.run_edit_commands(&[EditCommand::Clear, EditCommand::InsertString(buffer)]);
+}
+
+struct RawModeGuard;
+
+impl RawModeGuard {
+    fn enable() -> anyhow::Result<Self> {
+        terminal::enable_raw_mode()?;
+        Ok(Self)
+    }
+}
+
+impl Drop for RawModeGuard {
+    fn drop(&mut self) {
+        let _ = terminal::disable_raw_mode();
+    }
+}
+
+fn poll_agent_escape<W>(renderer: &mut TerminalRenderer<W>) -> ash::error::Result<()>
+where
+    W: io::Write,
+{
+    while terminal_event::poll(Duration::from_millis(0))? {
+        let TerminalEvent::Key(key) = terminal_event::read()? else {
+            continue;
+        };
+        if key.kind != KeyEventKind::Press || key.code != TerminalKeyCode::Esc {
+            continue;
+        }
+
+        renderer.render_cancel_prompt()?;
+        if read_escape_confirmation()? {
+            return Err(AshError::AgentCancelled);
+        }
+    }
+
+    Ok(())
+}
+
+fn read_escape_confirmation() -> ash::error::Result<bool> {
+    loop {
+        if let TerminalEvent::Key(key) = terminal_event::read()?
+            && key.kind == KeyEventKind::Press
+            && let Some(cancelled) = escape_confirmation_decision(key)
+        {
+            return Ok(cancelled);
+        }
+    }
+}
+
+fn escape_confirmation_decision(key: KeyEvent) -> Option<bool> {
+    match key.code {
+        TerminalKeyCode::Esc | TerminalKeyCode::Char('y' | 'Y') => Some(true),
+        TerminalKeyCode::Char('c' | 'C')
+            if key.modifiers.contains(TerminalKeyModifiers::CONTROL) =>
+        {
+            Some(true)
+        }
+        TerminalKeyCode::Enter | TerminalKeyCode::Char('n' | 'N') => Some(false),
+        _ => None,
+    }
 }
 
 fn set_shared_mode(mode: &Arc<Mutex<PromptMode>>, next: PromptMode) {
@@ -619,7 +717,11 @@ fn default_context_db_path() -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::{completion_replacement, shell_suggestions};
+    use crossterm::event::{
+        KeyCode as TerminalKeyCode, KeyEvent, KeyModifiers as TerminalKeyModifiers,
+    };
+
+    use super::{completion_replacement, escape_confirmation_decision, shell_suggestions};
 
     #[test]
     fn command_completion_replaces_the_current_command_token() {
@@ -648,5 +750,62 @@ mod tests {
         let commands = vec!["pwd".to_owned()];
 
         assert!(shell_suggestions("", 0, &commands).is_empty());
+    }
+
+    #[test]
+    fn escape_confirmation_requires_explicit_cancel_key() {
+        assert_eq!(
+            escape_confirmation_decision(KeyEvent::new(
+                TerminalKeyCode::Esc,
+                TerminalKeyModifiers::NONE,
+            )),
+            Some(true)
+        );
+        assert_eq!(
+            escape_confirmation_decision(KeyEvent::new(
+                TerminalKeyCode::Char('y'),
+                TerminalKeyModifiers::NONE,
+            )),
+            Some(true)
+        );
+        assert_eq!(
+            escape_confirmation_decision(KeyEvent::new(
+                TerminalKeyCode::Enter,
+                TerminalKeyModifiers::NONE,
+            )),
+            Some(false)
+        );
+        assert_eq!(
+            escape_confirmation_decision(KeyEvent::new(
+                TerminalKeyCode::Char('n'),
+                TerminalKeyModifiers::NONE,
+            )),
+            Some(false)
+        );
+        assert_eq!(
+            escape_confirmation_decision(KeyEvent::new(
+                TerminalKeyCode::Char('x'),
+                TerminalKeyModifiers::NONE,
+            )),
+            None
+        );
+        assert_eq!(
+            escape_confirmation_decision(KeyEvent::new(
+                TerminalKeyCode::Char('c'),
+                TerminalKeyModifiers::CONTROL,
+            )),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn escape_confirmation_ignores_plain_control_keys() {
+        assert_eq!(
+            escape_confirmation_decision(KeyEvent::new(
+                TerminalKeyCode::Char('c'),
+                TerminalKeyModifiers::NONE,
+            )),
+            None
+        );
     }
 }
