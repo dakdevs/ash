@@ -8,6 +8,7 @@ ASH is split around a small kernel:
 - `permissions`: opencode-style `allow | ask | deny` rules.
 - `plugins`: manifests, sources, capabilities, and event types.
 - `providers`: AI provider adapter contracts.
+- `setup`: `.ashrc` editing and provider setup commands.
 - `context`: SQLite-backed shell and agent history using Diesel typed queries.
 
 The current shell intentionally supports only simple commands and a small builtin set. The parser, AST, expander, and evaluator are separate so POSIX/Bash/Zsh features can be added without collapsing everything into process spawning code.

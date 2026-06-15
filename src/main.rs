@@ -1,6 +1,7 @@
 use std::{
     io::{self, Write},
     path::PathBuf,
+    process::{Command, Stdio},
 };
 
 use anyhow::Context;
@@ -10,8 +11,12 @@ use ash::{
     context::SqliteContextStore,
     providers::{AnyProvider, CodexProvider, UnimplementedProvider},
     session::{AshSession, PromptMode, SessionResponse},
+    setup::{
+        AshrcEditor, ProviderSetup, default_base_url_for_kind, default_env_for_kind,
+        display_provider, doctor_lines,
+    },
 };
-use clap::Parser;
+use clap::{Args, Parser, Subcommand};
 
 #[derive(Debug, Parser)]
 #[command(name = "ash", about = "Agentic Shell")]
@@ -30,11 +35,78 @@ struct Cli {
 
     #[arg(long, value_parser = parse_prompt_mode, help = "Override initial prompt mode")]
     mode: Option<PromptMode>,
+
+    #[command(subcommand)]
+    command: Option<Commands>,
+}
+
+#[derive(Debug, Subcommand)]
+enum Commands {
+    #[command(about = "Configure provider authentication")]
+    Auth {
+        #[command(subcommand)]
+        command: AuthCommands,
+    },
+    #[command(about = "Manage AI providers")]
+    Provider {
+        #[command(subcommand)]
+        command: ProviderCommands,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum AuthCommands {
+    #[command(about = "Authenticate with an OpenAI Codex subscription")]
+    Codex(AuthCodexArgs),
+}
+
+#[derive(Debug, Args)]
+struct AuthCodexArgs {
+    #[arg(long, help = "Print the auth command without running it")]
+    dry_run: bool,
+}
+
+#[derive(Debug, Subcommand)]
+enum ProviderCommands {
+    #[command(about = "Add or update a provider in .ashrc")]
+    Add(ProviderAddArgs),
+    #[command(about = "Set the default provider in .ashrc")]
+    Default { name: String },
+    #[command(about = "List configured providers")]
+    List,
+    #[command(about = "Diagnose configured providers")]
+    Doctor,
+}
+
+#[derive(Debug, Args)]
+struct ProviderAddArgs {
+    #[arg(value_name = "KIND", help = "Provider kind, such as codex or openai")]
+    kind: String,
+
+    #[arg(long, help = "Provider name; defaults to the kind")]
+    name: Option<String>,
+
+    #[arg(
+        long,
+        value_name = "ENV",
+        help = "Environment variable containing the API key"
+    )]
+    env: Option<String>,
+
+    #[arg(long, value_name = "URL", help = "Provider base URL")]
+    base_url: Option<String>,
+
+    #[arg(long, value_name = "MODEL", help = "Default model for this provider")]
+    model: Option<String>,
 }
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let default_ashrc = default_ashrc_path();
+    if let Some(command) = &cli.command {
+        return handle_cli_command(&cli, command, default_ashrc.as_deref());
+    }
+
     let config_path = if cli.no_ashrc {
         None
     } else {
@@ -63,6 +135,97 @@ fn main() -> anyhow::Result<()> {
     }
 
     run_interactive(&mut session)
+}
+
+fn handle_cli_command(
+    cli: &Cli,
+    command: &Commands,
+    default_ashrc: Option<&std::path::Path>,
+) -> anyhow::Result<()> {
+    match command {
+        Commands::Auth { command } => handle_auth_command(command),
+        Commands::Provider { command } => {
+            let path = cli
+                .ashrc
+                .as_deref()
+                .or(default_ashrc)
+                .context("no .ashrc path available; pass --ashrc or set HOME")?;
+            let editor = AshrcEditor::new(path);
+            handle_provider_command(&editor, command)
+        }
+    }
+}
+
+fn handle_auth_command(command: &AuthCommands) -> anyhow::Result<()> {
+    match command {
+        AuthCommands::Codex(args) => {
+            if args.dry_run {
+                println!("codex login");
+                return Ok(());
+            }
+
+            let status = Command::new("codex")
+                .arg("login")
+                .stdin(Stdio::inherit())
+                .stdout(Stdio::inherit())
+                .stderr(Stdio::inherit())
+                .status()
+                .context("failed to run `codex login`")?;
+
+            if status.success() {
+                Ok(())
+            } else {
+                anyhow::bail!("`codex login` exited with {status}");
+            }
+        }
+    }
+}
+
+fn handle_provider_command(editor: &AshrcEditor, command: &ProviderCommands) -> anyhow::Result<()> {
+    match command {
+        ProviderCommands::Add(args) => {
+            let name = args.name.clone().unwrap_or_else(|| args.kind.clone());
+            let setup = ProviderSetup {
+                name: name.clone(),
+                kind: args.kind.clone(),
+                env: args
+                    .env
+                    .clone()
+                    .or_else(|| default_env_for_kind(&args.kind)),
+                base_url: args
+                    .base_url
+                    .clone()
+                    .or_else(|| default_base_url_for_kind(&args.kind)),
+                model: args.model.clone(),
+            };
+            let provider = setup.into_config();
+            editor.add_provider(&provider)?;
+            println!("Added provider {name}");
+            Ok(())
+        }
+        ProviderCommands::Default { name } => {
+            editor.set_default_provider(name)?;
+            println!("Default provider set to {name}");
+            Ok(())
+        }
+        ProviderCommands::List => {
+            let config = editor.load_config()?;
+            for provider in config.providers.values() {
+                println!(
+                    "{}",
+                    display_provider(provider, config.default_provider.as_str())
+                );
+            }
+            Ok(())
+        }
+        ProviderCommands::Doctor => {
+            let config = editor.load_config()?;
+            for line in doctor_lines(&config) {
+                println!("{line}");
+            }
+            Ok(())
+        }
+    }
 }
 
 fn parse_prompt_mode(value: &str) -> Result<PromptMode, String> {
