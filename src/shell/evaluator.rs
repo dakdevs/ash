@@ -239,7 +239,9 @@ mod tests {
     fn executes_external_command_directly() {
         let mut executor = ShellExecutor::new(std::env::current_dir().expect("cwd"));
 
-        let result = executor.execute_line("printf hello").expect("printf");
+        let result = executor
+            .execute_line("/usr/bin/printf hello")
+            .expect("printf");
 
         assert_eq!(result.status, 0);
         assert_eq!(result.stdout, "hello");
@@ -251,7 +253,7 @@ mod tests {
         executor.execute_line("export NAME=ash").expect("export");
 
         let result = executor
-            .execute_line("printf '$NAME'")
+            .execute_line("/usr/bin/printf '$NAME'")
             .expect("single quoted printf");
 
         assert_eq!(result.stdout, "$NAME");

@@ -164,13 +164,18 @@ fn handle_auth_command(command: &AuthCommands) -> anyhow::Result<()> {
                 return Ok(());
             }
 
-            let status = Command::new("codex")
+            let provider = CodexProvider::discover().context(
+                "failed to find Codex; install the Codex CLI or open the Codex app first",
+            )?;
+            let status = Command::new(provider.executable())
                 .arg("login")
                 .stdin(Stdio::inherit())
                 .stdout(Stdio::inherit())
                 .stderr(Stdio::inherit())
                 .status()
-                .context("failed to run `codex login`")?;
+                .with_context(|| {
+                    format!("failed to run `{}` login", provider.executable().display())
+                })?;
 
             if status.success() {
                 Ok(())
