@@ -1,0 +1,33 @@
+---
+title: ASH
+description: ASH is an agentic shell with native command execution, durable context, and provider adapters.
+---
+
+# ASH
+
+<img
+  className="marketing-image"
+  src="/ash/images/ash-marketing.png"
+  alt="ASH, the agentic shell"
+/>
+
+ASH is an agentic shell for local development. It combines a native shell kernel with agent mode, provider adapters, permission rules, plugin contracts, and a SQLite-backed context store.
+
+## What ASH Does
+
+- Runs simple shell commands natively.
+- Switches between command mode and agent mode.
+- Records recent shell and agent context for follow-up prompts.
+- Supports provider setup through `.ashrc`.
+- Embeds a Claude Agent SDK bridge for Anthropic provider support.
+
+## Current Focus
+
+ASH is pre-1.0. The foundation is real, but the shell intentionally starts small: simple commands, explicit provider boundaries, and a plugin-shaped architecture that can grow without collapsing into one large runtime.
+
+## Quick Links
+
+- [Install and run ASH](/getting-started)
+- [Configure providers](/configuration)
+- [Use Claude through Anthropic](/providers/anthropic)
+- [Architecture reference](/reference/architecture)

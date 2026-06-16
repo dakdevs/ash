@@ -10,11 +10,12 @@ For automation and coding agents:
 PREFIX="$HOME/.local" ./scripts/install-agent.sh
 ```
 
-This builds with `cargo build --release --locked`, installs `ash` into `$PREFIX/bin`, and runs a smoke test.
+This installs the pinned JavaScript dependencies for the embedded Anthropic bridge, builds with `cargo build --release --locked`, installs `ash` into `$PREFIX/bin`, and runs a smoke test. Source builds require Cargo and Bun.
 
 ## Manual Install
 
 ```sh
+bun install --frozen-lockfile
 cargo build --release --locked
 install -d "$HOME/.local/bin"
 install -m 0755 target/release/ash "$HOME/.local/bin/ash"

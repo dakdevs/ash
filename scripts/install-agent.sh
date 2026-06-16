@@ -8,7 +8,12 @@ if ! command -v cargo >/dev/null 2>&1; then
   echo "cargo is required to install ASH" >&2
   exit 1
 fi
+if ! command -v bun >/dev/null 2>&1; then
+  echo "bun is required to build ASH's embedded Anthropic bridge" >&2
+  exit 1
+fi
 
+bun install --frozen-lockfile
 cargo build --release --locked
 mkdir -p "$bindir"
 install -m 0755 target/release/ash "$bindir/ash"

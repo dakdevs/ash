@@ -1,0 +1,81 @@
+---
+import type { NavEntry, NavPage } from "@mintlify/astro/helpers";
+import "@mintlify/components/styles.css";
+import "../styles/global.css";
+
+type Props = {
+  title: string;
+  description?: string;
+  group?: string | null;
+  sidebar: NavEntry[];
+  currentPath: string;
+  prev?: NavPage | null;
+  next?: NavPage | null;
+  withBase: (path: string) => string;
+};
+
+const { title, description, group, sidebar, currentPath, prev, next, withBase } =
+  Astro.props;
+
+function renderEntries(entries: NavEntry[]) {
+  return entries;
+}
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content={description ?? "ASH documentation"} />
+    <title>{title} · ASH</title>
+  </head>
+  <body>
+    <div class="site-shell">
+      <aside class="sidebar" aria-label="Documentation navigation">
+        <a class="brand" href={withBase("/")}>
+          <strong>ASH</strong>
+          <span>Agentic shell documentation</span>
+        </a>
+        <nav>
+          {
+            renderEntries(sidebar).map((entry) =>
+              "group" in entry ? (
+                <section>
+                  <div class="nav-group">{entry.group}</div>
+                  {entry.pages.map((page) => (
+                    <a
+                      class="nav-link"
+                      href={withBase(page.href)}
+                      aria-current={page.href === currentPath ? "page" : undefined}
+                    >
+                      {page.title}
+                    </a>
+                  ))}
+                </section>
+              ) : (
+                <a
+                  class="nav-link"
+                  href={withBase(entry.href)}
+                  aria-current={entry.href === currentPath ? "page" : undefined}
+                >
+                  {entry.title}
+                </a>
+              ),
+            )
+          }
+        </nav>
+      </aside>
+      <main class="content-wrap">
+        <article class="content">
+          {group && <div class="eyebrow">{group}</div>}
+          <slot />
+          <footer class="pager" aria-label="Page navigation">
+            <div>{prev && <a href={withBase(prev.href)}>← {prev.title}</a>}</div>
+            <div>{next && <a href={withBase(next.href)}>{next.title} →</a>}</div>
+          </footer>
+        </article>
+      </main>
+    </div>
+  </body>
+</html>

@@ -94,7 +94,6 @@ pub fn default_env_for_kind(kind: &str) -> Option<String> {
         "openai" => Some("OPENAI_API_KEY".to_owned()),
         "openrouter" => Some("OPENROUTER_API_KEY".to_owned()),
         "vercel-ai-gateway" => Some("AI_GATEWAY_API_KEY".to_owned()),
-        "anthropic" => Some("ANTHROPIC_API_KEY".to_owned()),
         _ => None,
     }
 }
@@ -108,12 +107,10 @@ pub fn default_base_url_for_kind(kind: &str) -> Option<String> {
 }
 
 fn default_auth_for_kind(kind: &str) -> impl FnOnce() -> ProviderAuth + '_ {
-    move || {
-        if kind == "codex" {
-            ProviderAuth::CodexSubscription
-        } else {
-            default_env_for_kind(kind).map_or(ProviderAuth::None, ProviderAuth::Env)
-        }
+    move || match kind {
+        "codex" => ProviderAuth::CodexSubscription,
+        "anthropic" => ProviderAuth::ClaudeCode,
+        _ => default_env_for_kind(kind).map_or(ProviderAuth::None, ProviderAuth::Env),
     }
 }
 
@@ -164,6 +161,12 @@ pub fn doctor_lines(config: &AshConfig) -> Vec<String> {
                     provider.name
                 ));
             }
+            ProviderAuth::ClaudeCode => {
+                lines.push(format!(
+                    "{}: uses Claude Code authentication",
+                    provider.name
+                ));
+            }
             ProviderAuth::None => lines.push(format!("{}: no auth required", provider.name)),
         }
     }
@@ -198,6 +201,7 @@ fn display_auth(auth: &ProviderAuth) -> String {
         ProviderAuth::None => "none".to_owned(),
         ProviderAuth::Env(variable) => format!("env:{variable}"),
         ProviderAuth::CodexSubscription => "codex-subscription".to_owned(),
+        ProviderAuth::ClaudeCode => "claude-code".to_owned(),
     }
 }
 

@@ -9,7 +9,9 @@ use std::{
 use serde_json::Value;
 
 use crate::{
+    anthropic_agent::AnthropicAgentProvider,
     codex_native::CodexSubscriptionProvider,
+    config::AshConfig,
     error::{AshError, Result},
     stream::{AgentStreamEvent, TokenUsage},
 };
@@ -55,6 +57,7 @@ pub trait Provider {
 
 #[derive(Debug, Clone)]
 pub enum AnyProvider {
+    Anthropic(AnthropicAgentProvider),
     CodexSubscription(CodexSubscriptionProvider),
     Codex(CodexProvider),
     Unimplemented(UnimplementedProvider),
@@ -63,6 +66,7 @@ pub enum AnyProvider {
 impl Provider for AnyProvider {
     fn complete(&mut self, request: ProviderRequest) -> Result<ProviderResponse> {
         match self {
+            Self::Anthropic(provider) => provider.complete(request),
             Self::CodexSubscription(provider) => provider.complete(request),
             Self::Codex(provider) => provider.complete(request),
             Self::Unimplemented(provider) => provider.complete(request),
@@ -75,11 +79,41 @@ impl Provider for AnyProvider {
         on_event: impl FnMut(AgentStreamEvent) -> Result<()>,
     ) -> Result<ProviderResponse> {
         match self {
+            Self::Anthropic(provider) => provider.complete_stream(request, on_event),
             Self::CodexSubscription(provider) => provider.complete_stream(request, on_event),
             Self::Codex(provider) => provider.complete_stream(request, on_event),
             Self::Unimplemented(provider) => provider.complete_stream(request, on_event),
         }
     }
+}
+
+#[must_use]
+pub fn provider_from_config(config: &AshConfig) -> AnyProvider {
+    if let Some(provider) = config.providers.get(&config.default_provider) {
+        return match provider.kind.as_str() {
+            "anthropic" => AnyProvider::Anthropic(AnthropicAgentProvider::from_config(provider)),
+            "codex" => discover_codex_provider(),
+            _ => AnyProvider::Unimplemented(UnimplementedProvider::new(provider.name.clone())),
+        };
+    }
+
+    if config.default_provider == "codex" {
+        discover_codex_provider()
+    } else {
+        AnyProvider::Unimplemented(UnimplementedProvider::new(config.default_provider.clone()))
+    }
+}
+
+fn discover_codex_provider() -> AnyProvider {
+    CodexSubscriptionProvider::discover().map_or_else(
+        |_| {
+            CodexProvider::discover().map_or_else(
+                |_| AnyProvider::Unimplemented(UnimplementedProvider::new("codex")),
+                AnyProvider::Codex,
+            )
+        },
+        AnyProvider::CodexSubscription,
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -144,9 +178,10 @@ mod tests {
     use std::{io::Cursor, path::PathBuf};
 
     use super::{
-        CodexJsonStream, CodexProvider, ProviderRequest, codex_exec_args, codex_response_text,
-        codex_stream_line_events, stream_child_output,
+        AnyProvider, CodexJsonStream, CodexProvider, ProviderRequest, codex_exec_args,
+        codex_response_text, codex_stream_line_events, provider_from_config, stream_child_output,
     };
+    use crate::config::AshConfig;
     use crate::stream::{AgentStreamEvent, TokenUsage};
 
     #[test]
@@ -154,6 +189,18 @@ mod tests {
         let provider = CodexProvider::new(PathBuf::from("/tmp/codex"));
 
         assert_eq!(provider.executable(), PathBuf::from("/tmp/codex"));
+    }
+
+    #[test]
+    fn provider_from_config_uses_anthropic_provider_for_anthropic_default() {
+        let config = AshConfig::from_ashrc(
+            "provider add anthropic kind anthropic auth claude-code\nprovider default anthropic\n",
+        )
+        .expect("config");
+
+        let provider = provider_from_config(&config);
+
+        assert!(matches!(provider, AnyProvider::Anthropic(_)));
     }
 
     #[test]

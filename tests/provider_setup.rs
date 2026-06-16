@@ -57,6 +57,52 @@ fn provider_add_uses_default_auth_and_base_url() {
 }
 
 #[test]
+fn provider_add_anthropic_uses_claude_code_auth_by_default() {
+    let dir = tempdir().expect("tempdir");
+    let ashrc = dir.path().join(".ashrc");
+
+    let output = Command::new(ash())
+        .arg("--ashrc")
+        .arg(&ashrc)
+        .args(["provider", "add", "anthropic"])
+        .output()
+        .expect("run ash provider add anthropic");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(&ashrc).expect("ashrc"),
+        "provider add anthropic kind anthropic auth claude-code\n"
+    );
+}
+
+#[test]
+fn provider_add_anthropic_allows_explicit_env_auth() {
+    let dir = tempdir().expect("tempdir");
+    let ashrc = dir.path().join(".ashrc");
+
+    let output = Command::new(ash())
+        .arg("--ashrc")
+        .arg(&ashrc)
+        .args(["provider", "add", "anthropic", "--env", "ANTHROPIC_API_KEY"])
+        .output()
+        .expect("run ash provider add anthropic");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(&ashrc).expect("ashrc"),
+        "provider add anthropic kind anthropic env ANTHROPIC_API_KEY\n"
+    );
+}
+
+#[test]
 fn provider_default_updates_existing_default() {
     let dir = tempdir().expect("tempdir");
     let ashrc = dir.path().join(".ashrc");
@@ -145,4 +191,37 @@ fn auth_codex_dry_run_explains_setup_command() {
 
     assert!(output.status.success());
     assert_eq!(String::from_utf8_lossy(&output.stdout), "codex login\n");
+}
+
+#[test]
+fn auth_anthropic_configures_anthropic_as_default_provider() {
+    let dir = tempdir().expect("tempdir");
+    let ashrc = dir.path().join(".ashrc");
+
+    let output = Command::new(ash())
+        .arg("--ashrc")
+        .arg(&ashrc)
+        .args(["auth", "anthropic"])
+        .output()
+        .expect("run ash auth anthropic");
+
+    assert!(output.status.success());
+    assert_eq!(
+        fs::read_to_string(&ashrc).expect("ashrc"),
+        "provider add anthropic kind anthropic auth claude-code\nprovider default anthropic\n"
+    );
+}
+
+#[test]
+fn auth_anthropic_dry_run_explains_provider_commands() {
+    let output = Command::new(ash())
+        .args(["auth", "anthropic", "--dry-run"])
+        .output()
+        .expect("run ash auth anthropic dry-run");
+
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "ash provider add anthropic\nash provider default anthropic\n"
+    );
 }

@@ -1,0 +1,96 @@
+---
+import { components } from "@mintlify/astro/components";
+import {
+  resolvePageData,
+  type NavPage,
+} from "@mintlify/astro/helpers";
+import docsConfig from "../../content/docs.json";
+import DocsLayout from "../layouts/DocsLayout.astro";
+
+type MdxModule = {
+  default: unknown;
+  frontmatter?: {
+    title?: string;
+    description?: string;
+  };
+};
+
+const eagerPages = import.meta.glob<MdxModule>("../../.mintlify/docs/**/*.mdx", {
+  eager: true,
+});
+
+export async function getStaticPaths() {
+  const routePages = import.meta.glob<MdxModule>("../../.mintlify/docs/**/*.mdx", {
+    eager: true,
+  });
+  return Object.keys(routePages).map((file) => {
+    const routeSlug = file
+      .replace("../../.mintlify/docs/", "")
+      .replace(/\.mdx$/, "")
+      .replace(/^index$/, "");
+    return {
+      params: { slug: routeSlug === "" ? undefined : routeSlug },
+    };
+  });
+}
+
+const slug = Astro.params.slug ?? "";
+const currentPath = slug === "" ? "/" : `/${slug}`;
+const modulePath =
+  slug === ""
+    ? "../../.mintlify/docs/index.mdx"
+    : `../../.mintlify/docs/${slug}.mdx`;
+const page = eagerPages[modulePath];
+
+if (!page) {
+  return Astro.redirect(Astro.base);
+}
+
+const Content = page.default;
+const title = page.frontmatter?.title ?? "ASH";
+const basePath = import.meta.env.BASE_URL ?? "/";
+const titleMap = Object.fromEntries(
+  Object.entries(eagerPages).map(([file, module]) => [
+    slugFromFile(file) === "" ? "/" : `/${slugFromFile(file)}`,
+    module.frontmatter?.title ?? titleFromSlug(slugFromFile(file)),
+  ]),
+);
+const context = resolvePageData(docsConfig, { titleMap, currentPath });
+
+function slugFromFile(file: string): string {
+  return file
+    .replace("../../.mintlify/docs/", "")
+    .replace(/\.mdx$/, "")
+    .replace(/^index$/, "");
+}
+
+function titleFromSlug(value: string): string {
+  if (value === "") {
+    return "Overview";
+  }
+  return value
+    .split("/")
+    .pop()!
+    .split("-")
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function withBase(path: string): string {
+  const base = basePath.endsWith("/") ? basePath : `${basePath}/`;
+  return `${base}${path.replace(/^\//, "")}`;
+}
+---
+
+<DocsLayout
+  title={title}
+  description={page.frontmatter?.description}
+  group={context.groupName}
+  sidebar={context.sidebarEntries}
+  currentPath={currentPath}
+  prev={context.footerPages.prev as NavPage | null}
+  next={context.footerPages.next as NavPage | null}
+  withBase={withBase}
+>
+  <Content components={components} />
+</DocsLayout>

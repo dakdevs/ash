@@ -1,0 +1,49 @@
+---
+title: Configuration
+description: Configure ASH startup behavior, providers, permissions, and plugins with .ashrc.
+---
+
+# Configuration
+
+ASH reads `~/.ashrc` by default. You can pass another file with `--ashrc` or skip config with `--no-ashrc`.
+
+## Example
+
+```text
+set default_mode agent
+set command_mode persistent
+provider add anthropic kind anthropic auth claude-code
+provider default anthropic
+permission bash "git status*" allow
+plugin process my-statusline ~/.config/ash/plugins/statusline statusline
+```
+
+## Provider Setup
+
+Common provider setup is available through commands:
+
+```sh
+ash provider add codex
+ash auth anthropic
+ash provider list
+ash provider doctor
+```
+
+API-key providers reference environment variables rather than storing secrets directly:
+
+```sh
+export OPENAI_API_KEY="..."
+ash provider add openai
+```
+
+## Permissions
+
+Permission rules use the shape:
+
+```text
+permission TOOL "PATTERN" allow
+permission TOOL "PATTERN" ask
+permission TOOL "PATTERN" deny
+```
+
+Rules are intentionally explicit so agent and shell behavior can stay auditable.

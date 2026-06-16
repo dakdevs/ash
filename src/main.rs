@@ -2,25 +2,30 @@ use std::{
     borrow::Cow,
     io,
     io::IsTerminal,
+    io::Write,
     path::PathBuf,
     process::{Command, Stdio},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+    thread::{self, JoinHandle},
     time::Duration,
 };
 
 use anyhow::Context;
 use ash::{
     agent::ProviderAgent,
-    codex_native::CodexSubscriptionProvider,
     config::AshConfig,
     context::SqliteContextStore,
     error::AshError,
-    providers::{AnyProvider, CodexProvider, UnimplementedProvider},
+    providers::{CodexProvider, provider_from_config},
     session::{AshSession, PromptMode, SessionResponse},
     setup::{
         AshrcEditor, ProviderSetup, default_base_url_for_kind, default_env_for_kind,
         display_provider, doctor_lines,
     },
+    spinners,
     ui::TerminalRenderer,
 };
 use clap::{Args, Parser, Subcommand};
@@ -79,11 +84,19 @@ enum Commands {
 enum AuthCommands {
     #[command(about = "Authenticate with an OpenAI Codex subscription")]
     Codex(AuthCodexArgs),
+    #[command(about = "Configure Anthropic as the default provider")]
+    Anthropic(AuthAnthropicArgs),
 }
 
 #[derive(Debug, Args)]
 struct AuthCodexArgs {
     #[arg(long, help = "Print the auth command without running it")]
+    dry_run: bool,
+}
+
+#[derive(Debug, Args)]
+struct AuthAnthropicArgs {
+    #[arg(long, help = "Print the provider setup commands without running them")]
     dry_run: bool,
 }
 
@@ -141,15 +154,7 @@ fn main() -> anyhow::Result<()> {
 
     let context_path = cli.context_db.unwrap_or_else(default_context_db_path);
     let context = SqliteContextStore::open(context_path).context("failed to open context store")?;
-    let provider = CodexSubscriptionProvider::discover().map_or_else(
-        |_| {
-            CodexProvider::discover().map_or_else(
-                |_| AnyProvider::Unimplemented(UnimplementedProvider::new("codex")),
-                AnyProvider::Codex,
-            )
-        },
-        AnyProvider::CodexSubscription,
-    );
+    let provider = provider_from_config(&config);
     let agent = ProviderAgent::new(provider);
     let cwd = std::env::current_dir().context("failed to determine current directory")?;
     let mut session = AshSession::new(config, context, agent, cwd);
@@ -169,7 +174,7 @@ fn handle_cli_command(
     default_ashrc: Option<&std::path::Path>,
 ) -> anyhow::Result<()> {
     match command {
-        Commands::Auth { command } => handle_auth_command(command),
+        Commands::Auth { command } => handle_auth_command(cli, command, default_ashrc),
         Commands::Provider { command } => {
             let path = cli
                 .ashrc
@@ -182,7 +187,11 @@ fn handle_cli_command(
     }
 }
 
-fn handle_auth_command(command: &AuthCommands) -> anyhow::Result<()> {
+fn handle_auth_command(
+    cli: &Cli,
+    command: &AuthCommands,
+    default_ashrc: Option<&std::path::Path>,
+) -> anyhow::Result<()> {
     match command {
         AuthCommands::Codex(args) => {
             if args.dry_run {
@@ -208,6 +217,32 @@ fn handle_auth_command(command: &AuthCommands) -> anyhow::Result<()> {
             } else {
                 anyhow::bail!("`codex login` exited with {status}");
             }
+        }
+        AuthCommands::Anthropic(args) => {
+            if args.dry_run {
+                println!("ash provider add anthropic");
+                println!("ash provider default anthropic");
+                return Ok(());
+            }
+
+            let path = cli
+                .ashrc
+                .as_deref()
+                .or(default_ashrc)
+                .context("no .ashrc path available; pass --ashrc or set HOME")?;
+            let editor = AshrcEditor::new(path);
+            let provider = ProviderSetup {
+                name: "anthropic".to_owned(),
+                kind: "anthropic".to_owned(),
+                env: None,
+                base_url: None,
+                model: None,
+            }
+            .into_config();
+            editor.add_provider(&provider)?;
+            editor.set_default_provider("anthropic")?;
+            println!("Anthropic provider configured as default");
+            Ok(())
         }
     }
 }
@@ -348,13 +383,19 @@ where
                     let _raw_mode = RawModeGuard::enable()?;
                     renderer.set_raw_mode_line_endings(true);
                     renderer.begin_agent_response(&session.status_line())?;
+                    let mut loading_spinner = Some(AgentLoadingSpinner::start());
                     let response = session.handle_line_stream(&line, |event| {
+                        stop_agent_loading_spinner(&mut loading_spinner)?;
                         poll_agent_escape(&mut renderer)?;
                         renderer
                             .stream_agent_event(&event)
                             .map_err(AshError::from)?;
+                        if event_allows_loading_spinner(&event) {
+                            loading_spinner = Some(AgentLoadingSpinner::start());
+                        }
                         poll_agent_escape(&mut renderer)
                     });
+                    stop_agent_loading_spinner(&mut loading_spinner)?;
                     let cancelled = matches!(response, Err(AshError::AgentCancelled));
                     if cancelled {
                         renderer.render_agent_cancelled(&line)?;
@@ -417,6 +458,86 @@ fn restore_reedline_buffer(line_editor: &mut Reedline, next_buffer: &mut Option<
     };
 
     line_editor.run_edit_commands(&[EditCommand::Clear, EditCommand::InsertString(buffer)]);
+}
+
+struct AgentLoadingSpinner {
+    stop: Arc<AtomicBool>,
+    handle: Option<JoinHandle<io::Result<()>>>,
+}
+
+impl AgentLoadingSpinner {
+    fn start() -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = Arc::clone(&stop);
+        let spinner = spinners::default_spinner();
+        let mut frames = spinner.map_or_else(
+            || vec!["-".to_owned()],
+            |spinner| spinner.frames().to_owned(),
+        );
+        if frames.is_empty() {
+            frames.push("-".to_owned());
+        }
+        let interval =
+            spinner.map_or_else(|| Duration::from_millis(80), spinners::CliSpinner::interval);
+        let handle = thread::spawn(move || {
+            let stdout = io::stdout();
+            let mut stdout = stdout.lock();
+            let mut frame_index = 0usize;
+            while !thread_stop.load(Ordering::Relaxed) {
+                let frame = &frames[frame_index % frames.len()];
+                write_agent_loading_frame(&mut stdout, frame)?;
+                frame_index = frame_index.wrapping_add(1);
+                thread::sleep(interval);
+            }
+            Ok(())
+        });
+
+        Self {
+            stop,
+            handle: Some(handle),
+        }
+    }
+
+    fn stop(&mut self) -> anyhow::Result<()> {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            handle
+                .join()
+                .map_err(|_| anyhow::anyhow!("agent loading spinner thread panicked"))??;
+        }
+        clear_agent_loading_frame()?;
+        Ok(())
+    }
+}
+
+fn stop_agent_loading_spinner(spinner: &mut Option<AgentLoadingSpinner>) -> ash::error::Result<()> {
+    if let Some(mut spinner) = spinner.take() {
+        spinner
+            .stop()
+            .map_err(|error| AshError::Io(io::Error::other(error.to_string())))?;
+    }
+    Ok(())
+}
+
+fn event_allows_loading_spinner(event: &ash::stream::AgentStreamEvent) -> bool {
+    !matches!(
+        event,
+        ash::stream::AgentStreamEvent::AssistantText(_) | ash::stream::AgentStreamEvent::Usage(_)
+    )
+}
+
+fn write_agent_loading_frame(writer: &mut impl io::Write, frame: &str) -> io::Result<()> {
+    write!(
+        writer,
+        "\r\x1b[2K\x1b[48;2;18;22;28m\x1b[38;2;104;114;133m│ \x1b[38;2;137;148;168m{frame} loading\x1b[K\x1b[0m",
+    )?;
+    writer.flush()
+}
+
+fn clear_agent_loading_frame() -> io::Result<()> {
+    let mut stdout = io::stdout();
+    write!(stdout, "\r\x1b[2K")?;
+    stdout.flush()
 }
 
 struct RawModeGuard;
