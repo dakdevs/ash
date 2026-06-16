@@ -255,12 +255,13 @@ impl AnthropicBridgeStream {
 
 fn extract_embedded_bridge() -> Result<PathBuf> {
     let hash = fnv1a64(EMBEDDED_BRIDGE);
-    let dir = std::env::temp_dir().join("ash-anthropic-agent");
+    let dir = bridge_cache_dir();
     fs::create_dir_all(&dir)?;
     set_private_dir_permissions(&dir)?;
 
     let path = dir.join(executable_name(&format!("ash-anthropic-agent-{hash:016x}")));
     if path.exists() {
+        prune_bridge_cache(&dir, &path);
         return Ok(path);
     }
 
@@ -273,8 +274,61 @@ fn extract_embedded_bridge() -> Result<PathBuf> {
     ));
     fs::write(&tmp_path, EMBEDDED_BRIDGE)?;
     set_executable_permissions(&tmp_path)?;
-    fs::rename(&tmp_path, &path)?;
+    if let Err(source) = fs::rename(&tmp_path, &path) {
+        if path.exists() {
+            let _ = fs::remove_file(&tmp_path);
+        } else {
+            return Err(source.into());
+        }
+    }
+    prune_bridge_cache(&dir, &path);
     Ok(path)
+}
+
+fn bridge_cache_dir() -> PathBuf {
+    platform_cache_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("ash")
+        .join("anthropic-agent")
+}
+
+#[cfg(target_os = "macos")]
+fn platform_cache_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(|home| PathBuf::from(home).join("Library/Caches"))
+}
+
+#[cfg(target_os = "windows")]
+fn platform_cache_dir() -> Option<PathBuf> {
+    std::env::var_os("LOCALAPPDATA")
+        .or_else(|| std::env::var_os("APPDATA"))
+        .map(PathBuf::from)
+}
+
+#[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+fn platform_cache_dir() -> Option<PathBuf> {
+    std::env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))
+}
+
+fn prune_bridge_cache(dir: &Path, current_path: &Path) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    let current_name = current_path.file_name();
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() || path.file_name() == current_name {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if name.starts_with("ash-anthropic-agent-") {
+            let _ = fs::remove_file(path);
+        }
+    }
 }
 
 fn executable_name(name: &str) -> String {
@@ -355,7 +409,7 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::{AnthropicAgentProvider, anthropic_error_message};
+    use super::{AnthropicAgentProvider, anthropic_error_message, prune_bridge_cache};
     use crate::{
         providers::{Provider, ProviderRequest},
         stream::{AgentStreamEvent, TokenUsage},
@@ -419,6 +473,27 @@ mod tests {
 
         assert!(message.contains("Claude authentication"));
         assert!(message.contains("claude"));
+    }
+
+    #[test]
+    fn bridge_cache_prunes_stale_bridge_files() {
+        let dir = tempdir().expect("tempdir");
+        let current = dir.path().join("ash-anthropic-agent-current");
+        let stale = dir.path().join("ash-anthropic-agent-stale");
+        let stale_tmp = dir.path().join("ash-anthropic-agent-current.tmp.1234");
+        let unrelated = dir.path().join("other-file");
+
+        fs::write(&current, b"current").expect("current");
+        fs::write(&stale, b"stale").expect("stale");
+        fs::write(&stale_tmp, b"tmp").expect("tmp");
+        fs::write(&unrelated, b"unrelated").expect("unrelated");
+
+        prune_bridge_cache(dir.path(), &current);
+
+        assert!(current.exists());
+        assert!(!stale.exists());
+        assert!(!stale_tmp.exists());
+        assert!(unrelated.exists());
     }
 
     fn fake_bridge(dir: &Path, success: bool) -> std::path::PathBuf {
