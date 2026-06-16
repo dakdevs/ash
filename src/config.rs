@@ -91,6 +91,10 @@ impl AiProviderConfig {
                 parts.push("auth".to_owned());
                 parts.push("codex-subscription".to_owned());
             }
+            ProviderAuth::ClaudeCode => {
+                parts.push("auth".to_owned());
+                parts.push("claude-code".to_owned());
+            }
         }
 
         if let Some(base_url) = &self.base_url {
@@ -112,6 +116,7 @@ pub enum ProviderAuth {
     None,
     Env(String),
     CodexSubscription,
+    ClaudeCode,
 }
 
 impl AshConfig {
@@ -250,6 +255,7 @@ fn parse_provider_add(
             "kind" => kind = Some(value.clone()),
             "env" => auth = ProviderAuth::Env(value.clone()),
             "auth" if value == "codex-subscription" => auth = ProviderAuth::CodexSubscription,
+            "auth" if value == "claude-code" => auth = ProviderAuth::ClaudeCode,
             "auth" if value == "none" => auth = ProviderAuth::None,
             "auth" => {
                 return Err(AshError::AshrcParse {
@@ -355,9 +361,10 @@ mod tests {
 
     #[test]
     fn parses_provider_add_forms() {
-        let config = AshConfig::from_ashrc(
+        let config = AshConfig::from_ashrc(concat!(
             "provider add openai kind openai env OPENAI_API_KEY model gpt-5\n",
-        )
+            "provider add anthropic kind anthropic auth claude-code\n",
+        ))
         .expect("config");
 
         let provider = config.providers.get("openai").expect("openai provider");
@@ -367,5 +374,16 @@ mod tests {
             super::ProviderAuth::Env("OPENAI_API_KEY".to_owned())
         );
         assert_eq!(provider.model.as_deref(), Some("gpt-5"));
+
+        let provider = config
+            .providers
+            .get("anthropic")
+            .expect("anthropic provider");
+        assert_eq!(provider.kind, "anthropic");
+        assert_eq!(provider.auth, super::ProviderAuth::ClaudeCode);
+        assert_eq!(
+            provider.as_ashrc_line(),
+            "provider add anthropic kind anthropic auth claude-code"
+        );
     }
 }

@@ -15,7 +15,7 @@ Before `1.0.0`, minor versions may include breaking changes, but they must be ca
 For user-visible changes:
 
 ```sh
-npm run changeset
+bun run changeset
 ```
 
 Commit the generated `.changeset/*.md` file with your pull request.
@@ -33,7 +33,7 @@ Commit the generated `.changeset/*.md` file with your pull request.
 5. Create and push the release tag:
 
    ```sh
-   npm run release:tag
+   bun run release:tag
    ```
 
 6. Confirm the GitHub Release workflow publishes:
@@ -47,7 +47,7 @@ Commit the generated `.changeset/*.md` file with your pull request.
 If package and Cargo versions drift:
 
 ```sh
-node scripts/sync-cargo-version.mjs
+bun scripts/sync-cargo-version.mjs
 cargo update --workspace
 ```
 

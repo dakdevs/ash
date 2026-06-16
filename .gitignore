@@ -1,5 +1,10 @@
 /target/
-/node_modules/
+node_modules/
+/.astro/
+/.mintlify/
+/docs/.astro/
+/docs/.mintlify/
+/docs/dist/
 /.ash-context.db
 *.db
 *.sqlite

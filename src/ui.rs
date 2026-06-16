@@ -1,4 +1,7 @@
-use std::io::{self, Write};
+use std::{
+    io::{self, Write},
+    time::{Duration, Instant},
+};
 
 use crate::{
     session::SessionResponse,
@@ -13,6 +16,8 @@ where
     agent_chunk_ends_with_newline: bool,
     agent_line_open: bool,
     current_section: Option<AgentSection>,
+    thinking_started_at: Option<Instant>,
+    thinking_finished: bool,
     style: TerminalStyle,
     line_ending: &'static str,
 }
@@ -49,6 +54,10 @@ impl TerminalStyle {
             StyleRole::Success => "\x1b[38;2;139;233;178m",
             StyleRole::Warning => "\x1b[38;2;255;213;128m",
         }
+    }
+
+    const fn fill_panel_to_end(self) -> &'static str {
+        if self.color { "\x1b[K" } else { "" }
     }
 }
 
@@ -99,20 +108,22 @@ impl<W> TerminalRenderer<W>
 where
     W: Write,
 {
-    pub const fn new(writer: W) -> Self {
+    pub fn new(writer: W) -> Self {
         Self::with_style(writer, TerminalStyle::color())
     }
 
-    pub const fn plain(writer: W) -> Self {
+    pub fn plain(writer: W) -> Self {
         Self::with_style(writer, TerminalStyle::plain())
     }
 
-    pub const fn with_style(writer: W, style: TerminalStyle) -> Self {
+    pub fn with_style(writer: W, style: TerminalStyle) -> Self {
         Self {
             writer,
             agent_chunk_ends_with_newline: true,
             agent_line_open: false,
             current_section: None,
+            thinking_started_at: None,
+            thinking_finished: false,
             style,
             line_ending: "\n",
         }
@@ -131,16 +142,19 @@ where
         self.agent_chunk_ends_with_newline = true;
         self.agent_line_open = false;
         self.current_section = None;
+        self.thinking_started_at = Some(Instant::now());
+        self.thinking_finished = false;
         self.write_newline()?;
         write!(
             self.writer,
-            "{}{}╭─ {}assistant{} {}{}{}{}",
+            "{}{}╭─ {}assistant{} {}{}{}{}{}",
             self.style.paint(StyleRole::Panel),
             self.style.paint(StyleRole::Border),
             self.style.paint(StyleRole::Header),
             self.style.paint(StyleRole::Border),
             self.style.paint(StyleRole::Muted),
             status,
+            self.style.fill_panel_to_end(),
             self.style.paint(StyleRole::Reset),
             self.line_ending,
         )?;
@@ -151,28 +165,36 @@ where
     pub fn stream_agent_event(&mut self, event: &AgentStreamEvent) -> io::Result<()> {
         match event {
             AgentStreamEvent::Status(status) => {
+                if is_lifecycle_status(status) {
+                    return self.writer.flush();
+                }
                 self.begin_section(AgentSection::Thinking)?;
                 self.write_agent_lines(status, StyleRole::Muted)?;
             }
             AgentStreamEvent::ToolStarted { command } => {
+                self.finish_thinking()?;
                 self.begin_section(AgentSection::Tool)?;
                 self.write_agent_lines(&format!("$ {command}"), StyleRole::Accent)?;
             }
             AgentStreamEvent::ToolOutput(output) => {
+                self.finish_thinking()?;
                 self.begin_section(AgentSection::Output)?;
                 self.write_agent_lines(output, StyleRole::Body)?;
             }
             AgentStreamEvent::ToolCompleted { exit_code } => {
+                self.finish_thinking()?;
                 self.begin_section(AgentSection::Tool)?;
                 let status =
                     exit_code.map_or_else(|| "exit ?".to_owned(), |code| format!("exit {code}"));
                 self.write_agent_lines(&status, StyleRole::Success)?;
             }
             AgentStreamEvent::AssistantText(text) => {
+                self.finish_thinking()?;
                 self.begin_section(AgentSection::Response)?;
                 self.write_agent_inline(text, StyleRole::Body)?;
             }
             AgentStreamEvent::Usage(usage) => {
+                self.finish_thinking()?;
                 self.begin_section(AgentSection::Usage)?;
                 self.write_agent_lines(&format_usage(*usage), StyleRole::Muted)?;
             }
@@ -186,9 +208,10 @@ where
         }
         write!(
             self.writer,
-            "{}{}╰{}{}",
+            "{}{}╰{}{}{}",
             self.style.paint(StyleRole::Panel),
             self.style.paint(StyleRole::Border),
+            self.style.fill_panel_to_end(),
             self.style.paint(StyleRole::Reset),
             self.line_ending,
         )?;
@@ -233,12 +256,13 @@ where
         self.write_agent_prefix()?;
         write!(
             self.writer,
-            "{}cancel request? {}Esc/y{} cancel · {}Enter/n{} continue{}{}",
+            "{}cancel request? {}Esc/y{} cancel · {}Enter/n{} continue{}{}{}",
             self.style.paint(StyleRole::Warning),
             self.style.paint(StyleRole::Accent),
             self.style.paint(StyleRole::Warning),
             self.style.paint(StyleRole::Accent),
             self.style.paint(StyleRole::Warning),
+            self.style.fill_panel_to_end(),
             self.style.paint(StyleRole::Reset),
             self.line_ending,
         )?;
@@ -271,12 +295,12 @@ where
         }
         write!(
             self.writer,
-            "{}{}│{} {}{}{}{}",
+            "{}{}│ {}{}{}{}{}",
             self.style.paint(StyleRole::Panel),
             self.style.paint(StyleRole::Border),
-            self.style.paint(StyleRole::Reset),
             self.style.paint(section.role()),
             section.label(),
+            self.style.fill_panel_to_end(),
             self.style.paint(StyleRole::Reset),
             self.line_ending,
         )?;
@@ -289,9 +313,10 @@ where
             self.write_agent_prefix()?;
             write!(
                 self.writer,
-                "{}{}{}{}",
+                "{}{}{}{}{}",
                 self.style.paint(role),
                 line,
+                self.style.fill_panel_to_end(),
                 self.style.paint(StyleRole::Reset),
                 self.line_ending,
             )?;
@@ -321,6 +346,13 @@ where
             )?;
 
             if segment.ends_with('\n') {
+                write!(
+                    self.writer,
+                    "{}{}{}",
+                    self.style.paint(StyleRole::Panel),
+                    self.style.fill_panel_to_end(),
+                    self.style.paint(StyleRole::Reset),
+                )?;
                 self.write_newline()?;
                 self.agent_line_open = false;
                 self.agent_chunk_ends_with_newline = true;
@@ -334,6 +366,13 @@ where
 
     fn close_open_agent_line(&mut self) -> io::Result<()> {
         if self.agent_line_open {
+            write!(
+                self.writer,
+                "{}{}{}",
+                self.style.paint(StyleRole::Panel),
+                self.style.fill_panel_to_end(),
+                self.style.paint(StyleRole::Reset),
+            )?;
             self.write_newline()?;
             self.agent_line_open = false;
             self.agent_chunk_ends_with_newline = true;
@@ -344,9 +383,10 @@ where
     fn write_agent_empty_line(&mut self) -> io::Result<()> {
         write!(
             self.writer,
-            "{}{}│{}{}",
+            "{}{}│{}{}{}",
             self.style.paint(StyleRole::Panel),
             self.style.paint(StyleRole::Border),
+            self.style.fill_panel_to_end(),
             self.style.paint(StyleRole::Reset),
             self.line_ending,
         )
@@ -355,17 +395,52 @@ where
     fn write_agent_prefix(&mut self) -> io::Result<()> {
         write!(
             self.writer,
-            "{}{}│{}{} ",
+            "{}{}│{} ",
             self.style.paint(StyleRole::Panel),
             self.style.paint(StyleRole::Border),
-            self.style.paint(StyleRole::Reset),
             self.style.paint(StyleRole::Panel),
         )
+    }
+
+    fn finish_thinking(&mut self) -> io::Result<()> {
+        if self.thinking_finished {
+            return Ok(());
+        }
+
+        let elapsed = self
+            .thinking_started_at
+            .take()
+            .map_or(Duration::ZERO, |started_at| started_at.elapsed());
+        self.begin_section(AgentSection::Thinking)?;
+        self.write_agent_lines(
+            &format!("thought for {}", format_thought_duration(elapsed)),
+            StyleRole::Muted,
+        )?;
+        self.thinking_finished = true;
+        Ok(())
     }
 
     fn write_newline(&mut self) -> io::Result<()> {
         write!(self.writer, "{}", self.line_ending)
     }
+}
+
+fn is_lifecycle_status(status: &str) -> bool {
+    matches!(status, "started" | "turn.started")
+}
+
+fn format_thought_duration(duration: Duration) -> String {
+    if duration < Duration::from_secs(1) {
+        return "<1s".to_owned();
+    }
+
+    let millis = duration.as_millis();
+    if millis < 10_000 {
+        let tenths = (millis + 50) / 100;
+        return format!("{}.{}s", tenths / 10, tenths % 10);
+    }
+
+    format!("{}s", (millis + 500) / 1000)
 }
 
 fn format_usage(usage: TokenUsage) -> String {
@@ -404,7 +479,7 @@ mod tests {
         let output = String::from_utf8(output).expect("utf8");
         assert_eq!(
             output,
-            "\n╭─ assistant [ash mode=> provider=codex cwd=/tmp/project]\n│\n│ response\n│ hello\n╰\n\n"
+            "\n╭─ assistant [ash mode=> provider=codex cwd=/tmp/project]\n│\n│ thinking\n│ thought for <1s\n│\n│ response\n│ hello\n╰\n\n"
         );
     }
 
@@ -452,7 +527,7 @@ mod tests {
         let output = String::from_utf8(output).expect("utf8");
         assert_eq!(
             output,
-            "\n╭─ assistant [ash]\n│\n│ thinking\n│ started\n│\n│ tool\n│ $ git status --short\n│\n│ output\n│  M src/ui.rs\n│\n│ response\n│ clean\n│\n│ usage\n│ in 12 · out 3 · cached 4 · reasoning 1\n╰\n\n"
+            "\n╭─ assistant [ash]\n│\n│ thinking\n│ thought for <1s\n│\n│ tool\n│ $ git status --short\n│\n│ output\n│  M src/ui.rs\n│\n│ response\n│ clean\n│\n│ usage\n│ in 12 · out 3 · cached 4 · reasoning 1\n╰\n\n"
         );
     }
 
@@ -490,7 +565,23 @@ mod tests {
         let output = String::from_utf8(output).expect("utf8");
         assert_eq!(
             output,
-            "\r\n╭─ assistant [ash]\r\n│\r\n│ response\r\n│ hello\r\n╰\r\n\r\n"
+            "\r\n╭─ assistant [ash]\r\n│\r\n│ thinking\r\n│ thought for <1s\r\n│\r\n│ response\r\n│ hello\r\n╰\r\n\r\n"
         );
+    }
+
+    #[test]
+    fn colored_agent_rows_fill_the_panel_background() {
+        let mut output = Vec::new();
+        let mut renderer = TerminalRenderer::new(&mut output);
+
+        renderer.begin_agent_response("[ash]").expect("begin");
+        renderer
+            .stream_agent_event(&AgentStreamEvent::AssistantText("hello".to_owned()))
+            .expect("stream");
+        renderer.end_agent_response().expect("end");
+
+        let output = String::from_utf8(output).expect("utf8");
+        assert!(output.contains("\x1b[48;2;18;22;28m"));
+        assert!(output.contains("\x1b[K"));
     }
 }

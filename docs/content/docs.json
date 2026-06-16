@@ -1,0 +1,23 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "name": "ASH",
+  "colors": {
+    "primary": "#0f766e"
+  },
+  "navigation": {
+    "groups": [
+      {
+        "group": "Start",
+        "pages": ["index", "getting-started", "configuration"]
+      },
+      {
+        "group": "Providers",
+        "pages": ["providers/anthropic"]
+      },
+      {
+        "group": "Reference",
+        "pages": ["reference/architecture", "development"]
+      }
+    ]
+  }
+}

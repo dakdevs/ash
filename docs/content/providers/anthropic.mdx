@@ -1,0 +1,56 @@
+---
+title: Anthropic Provider
+description: Use Claude in ASH through the embedded Claude Agent SDK bridge.
+---
+
+# Anthropic Provider
+
+ASH supports Anthropic through a first-party provider backed by the Claude Agent SDK. The bridge is compiled with Bun and embedded into the `ash` binary during `cargo build`.
+
+## Add The Provider
+
+```sh
+ash auth anthropic
+```
+
+That writes the Anthropic provider config and makes it the default provider:
+
+```text
+provider add anthropic kind anthropic auth claude-code
+provider default anthropic
+```
+
+The equivalent explicit commands are:
+
+```sh
+ash provider add anthropic
+ash provider default anthropic
+```
+
+## Authentication
+
+The default `claude-code` auth mode uses Claude Code authentication and settings through the embedded Claude Agent SDK bridge. `ash auth anthropic` configures Anthropic as the default ASH provider; it does not launch Claude Code. Log in with Claude Code separately if needed, then ASH reuses the same Claude login/config state.
+
+To force API-key auth instead:
+
+```sh
+export ANTHROPIC_API_KEY="..."
+ash provider add anthropic --env ANTHROPIC_API_KEY
+```
+
+## Runtime Shape
+
+At build time:
+
+1. Cargo runs `build.rs`.
+2. `build.rs` asks Bun to compile the TypeScript bridge.
+3. Rust embeds the compiled bridge bytes into `ash`.
+
+At runtime:
+
+1. ASH extracts the embedded bridge to a per-user temp path.
+2. ASH sends one JSON request to the bridge.
+3. The bridge streams normalized NDJSON events back to ASH.
+4. ASH renders those events as assistant text, tool events, status, and usage.
+
+Set `ASH_ANTHROPIC_BRIDGE` to point at a custom bridge executable for tests or debugging.

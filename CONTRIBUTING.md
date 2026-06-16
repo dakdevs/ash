@@ -7,13 +7,12 @@ Thanks for helping build ASH. This project is intentionally early, so high-quali
 Install the pinned toolchains:
 
 - Rust `1.94.1`
-- Node `25.9.0`
-- npm `11.12.1`
+- Bun `1.3.14`
 
-Install Node tooling:
+Install workspace tooling:
 
 ```sh
-npm install
+bun install --frozen-lockfile
 ```
 
 Run the Rust checks before opening a pull request:
@@ -49,7 +48,7 @@ Prefer tests through public interfaces such as `AshSession`, `ShellExecutor`, `C
 User-visible changes need a changeset:
 
 ```sh
-npm run changeset
+bun run changeset
 ```
 
 Choose:
@@ -79,7 +78,7 @@ Maintainers:
 4. Create and push the version tag:
 
    ```sh
-   npm run release:tag
+   bun run release:tag
    ```
 
 5. Confirm the GitHub Release workflow publishes Linux/macOS assets.

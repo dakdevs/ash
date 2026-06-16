@@ -1,5 +1,9 @@
 # ASH
 
+<p align="center">
+  <img src="assets/ash-marketing.png" alt="ASH, the agentic shell" width="100%" />
+</p>
+
 ASH is the Agentic Shell: a Rust login-shell project where agent prompts are first-class and native shell execution is built intentionally from the ground up.
 
 The project is early, but the foundation is real: ASH has explicit agent/command modes, a native simple-command evaluator, `.ashrc` startup declarations, Diesel-backed SQLite context storage, provider boundaries, permission rules, and plugin contracts.
@@ -86,7 +90,7 @@ ash
 
 The prototype reads `~/.ashrc` by default. Example:
 
-```ash
+```text
 set default_mode agent
 set command_mode persistent
 provider default codex
@@ -115,9 +119,28 @@ API-key providers store environment variable references in `.ashrc`, not secret 
 export OPENAI_API_KEY="..."
 ash provider add openai
 ash provider add openrouter
-ash provider add anthropic
 ash provider add vercel-ai-gateway
 ash provider default openai
+```
+
+Claude uses the embedded Claude Agent SDK bridge and Claude Code authentication by default:
+
+```sh
+ash auth anthropic
+```
+
+That shortcut writes the Anthropic provider config and makes it the default provider. The equivalent explicit commands are:
+
+```sh
+ash provider add anthropic
+ash provider default anthropic
+```
+
+To force Anthropic API-key auth instead:
+
+```sh
+export ANTHROPIC_API_KEY="..."
+ash provider add anthropic --env ANTHROPIC_API_KEY
 ```
 
 Local providers:
@@ -145,19 +168,19 @@ ASH is split around a small kernel:
 - `providers`: AI provider adapter contracts.
 - `context`: SQLite-backed shell and agent history using Diesel typed queries.
 
-More detail lives in [docs/architecture.md](docs/architecture.md).
+More detail lives in [docs/content/reference/architecture.mdx](docs/content/reference/architecture.mdx).
 
 ## Development
 
 Required toolchain:
 
 - Rust `1.94.1`
-- Node `25.9.0` and npm `11.12.1` for Changesets/release tooling
+- Bun `1.3.14` for workspaces, docs, bridge builds, and Changesets release tooling
 
 Install development tooling:
 
 ```sh
-npm install
+bun install --frozen-lockfile
 ```
 
 Run checks:
@@ -171,7 +194,7 @@ cargo clippy --all-targets -- -D warnings
 Add a changeset for user-visible changes:
 
 ```sh
-npm run changeset
+bun run changeset
 ```
 
 ## Releases
@@ -181,7 +204,7 @@ ASH uses Changesets for version/changelog PRs and GitHub Actions for release art
 - Pull requests with user-visible changes should include a `.changeset/*.md` file.
 - Merging changes to `main` runs the Version Packages workflow.
 - Maintainers merge the generated version PR.
-- Create and push a tag with `npm run release:tag`.
+- Create and push a tag with `bun run release:tag`.
 - Pushing `v*` tags builds Linux/macOS release assets and publishes a GitHub Release.
 
 See [VERSIONING.md](VERSIONING.md) for the full versioning and release process.

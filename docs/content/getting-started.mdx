@@ -1,0 +1,45 @@
+---
+title: Getting Started
+description: Install ASH from source and run your first command or agent prompt.
+---
+
+# Getting Started
+
+ASH is currently installed from source.
+
+## Requirements
+
+- Rust and Cargo
+- Bun 1.3.14
+- Git
+
+## Install
+
+```sh
+PREFIX="$HOME/.local" ./scripts/install-agent.sh
+```
+
+The installer runs `bun install --frozen-lockfile`, builds ASH with Cargo, installs the binary, and runs a smoke test.
+
+## Run ASH
+
+Start an interactive shell:
+
+```sh
+ash
+```
+
+Evaluate a single command-mode line:
+
+```sh
+ash --no-ashrc --mode command --eval 'printf ash'
+```
+
+## Modes
+
+ASH has two prompt modes:
+
+- Agent mode sends prompts to the configured provider.
+- Command mode executes shell input.
+
+Press tab on an empty prompt to toggle modes.

@@ -1,3 +1,8 @@
+---
+title: Architecture
+description: ASH is split around a small shell and agent kernel.
+---
+
 # ASH Architecture
 
 ASH is split around a small kernel:
@@ -11,7 +16,7 @@ ASH is split around a small kernel:
 - `setup`: `.ashrc` editing and provider setup commands.
 - `context`: SQLite-backed shell and agent history using Diesel typed queries.
 
-The current shell intentionally supports only simple commands and a small builtin set. The parser, AST, expander, and evaluator are separate so POSIX/Bash/Zsh features can be added without collapsing everything into process spawning code.
+The current shell intentionally supports only simple commands and a small builtin set. The parser, AST, expander, and evaluator are separate so POSIX, Bash, and Zsh features can be added without collapsing everything into process spawning code.
 
 Bundled features should use the same event and capability contracts as third-party plugins as those runtimes come online.
 

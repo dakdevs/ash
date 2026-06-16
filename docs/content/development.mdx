@@ -1,0 +1,42 @@
+---
+title: Development
+description: Build, test, and work on ASH in the Bun workspace monorepo.
+---
+
+# Development
+
+ASH is organized as a small monorepo with Bun workspaces.
+
+## Workspaces
+
+- `agent-bridges/anthropic`: TypeScript Claude Agent SDK bridge.
+- `docs`: Astro documentation site powered by `@mintlify/astro`.
+
+## Install Dependencies
+
+```sh
+bun install --frozen-lockfile
+```
+
+## Test
+
+```sh
+bun run bridge:test
+cargo test
+```
+
+## Docs
+
+Run the docs locally:
+
+```sh
+bun run docs:dev
+```
+
+Build the static docs site:
+
+```sh
+bun run docs:build
+```
+
+The docs build output lives in `docs/dist`.
