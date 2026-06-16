@@ -287,33 +287,7 @@ fn parse_provider_add(
 }
 
 fn split_words(line: &str) -> std::result::Result<Vec<String>, String> {
-    let mut words = Vec::new();
-    let mut current = String::new();
-    let mut quote = None;
-
-    for character in line.chars() {
-        match (quote, character) {
-            (None, '#') => break,
-            (None, '"' | '\'') => quote = Some(character),
-            (Some(active), character) if active == character => quote = None,
-            (None, character) if character.is_whitespace() => {
-                if !current.is_empty() {
-                    words.push(std::mem::take(&mut current));
-                }
-            }
-            (_, character) => current.push(character),
-        }
-    }
-
-    if quote.is_some() {
-        return Err("unterminated quote".to_owned());
-    }
-
-    if !current.is_empty() {
-        words.push(current);
-    }
-
-    Ok(words)
+    shell_words::split(line).map_err(|error| error.to_string())
 }
 
 #[cfg(test)]

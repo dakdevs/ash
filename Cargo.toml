@@ -8,14 +8,18 @@ license = "MIT"
 
 [dependencies]
 anyhow = "=1.0.102"
+base64 = "=0.22.1"
 clap = { version = "=4.6.1", features = ["derive"] }
 crossterm = "=0.29.0"
 diesel = { version = "=2.3.10", features = ["sqlite"] }
 diesel_migrations = { version = "=2.3.2", features = ["sqlite"] }
+fnv = "=1.0.7"
+globset = "=0.4.18"
 reedline = "=0.48.0"
 reqwest = { version = "=0.13.4", features = ["blocking", "json", "form"] }
 serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = "=1.0.150"
+shell-words = "=1.1.1"
 thiserror = "=2.0.18"
 
 [dev-dependencies]

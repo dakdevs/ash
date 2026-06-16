@@ -5,6 +5,13 @@ use std::{
     process::Command,
 };
 
+use base64::{
+    Engine as _, alphabet,
+    engine::{
+        DecodePaddingMode,
+        general_purpose::{GeneralPurpose, GeneralPurposeConfig},
+    },
+};
 use reqwest::{StatusCode, blocking::Client};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -24,6 +31,10 @@ const MAX_TOOL_ROUNDS: usize = 4;
 const AUTH_FILE_ENV: &str = "ASH_CODEX_AUTH_FILE";
 const API_ENDPOINT_ENV: &str = "ASH_CODEX_API_ENDPOINT";
 const ISSUER_ENV: &str = "ASH_CODEX_ISSUER";
+const BASE64_URL: GeneralPurpose = GeneralPurpose::new(
+    &alphabet::URL_SAFE,
+    GeneralPurposeConfig::new().with_decode_padding_mode(DecodePaddingMode::Indifferent),
+);
 
 #[derive(Debug, Clone)]
 pub struct CodexSubscriptionProvider {
@@ -355,7 +366,7 @@ fn extract_account_id(tokens: &CodexTokens) -> Option<String> {
 
 fn parse_account_id_from_jwt(token: &str) -> Option<String> {
     let payload = token.split('.').nth(1)?;
-    let decoded = base64_url_decode(payload)?;
+    let decoded = BASE64_URL.decode(payload).ok()?;
     let value: Value = serde_json::from_slice(&decoded).ok()?;
     value
         .get("chatgpt_account_id")
@@ -373,43 +384,6 @@ fn parse_account_id_from_jwt(token: &str) -> Option<String> {
         })
         .and_then(Value::as_str)
         .map(str::to_owned)
-}
-
-fn base64_url_decode(input: &str) -> Option<Vec<u8>> {
-    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut normalized = input.replace('-', "+").replace('_', "/");
-    while !normalized.len().is_multiple_of(4) {
-        normalized.push('=');
-    }
-
-    let mut output = Vec::with_capacity(normalized.len() * 3 / 4);
-    for chunk in normalized.as_bytes().chunks(4) {
-        let mut values = [0_u8; 4];
-        let mut padding = 0;
-        for (index, byte) in chunk.iter().copied().enumerate() {
-            if byte == b'=' {
-                padding += 1;
-                values[index] = 0;
-            } else {
-                values[index] =
-                    u8::try_from(TABLE.iter().position(|candidate| *candidate == byte)?).ok()?;
-            }
-        }
-
-        let combined = (u32::from(values[0]) << 18)
-            | (u32::from(values[1]) << 12)
-            | (u32::from(values[2]) << 6)
-            | u32::from(values[3]);
-        output.push(((combined >> 16) & 0xff) as u8);
-        if padding < 2 {
-            output.push(((combined >> 8) & 0xff) as u8);
-        }
-        if padding < 1 {
-            output.push((combined & 0xff) as u8);
-        }
-    }
-
-    Some(output)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -531,89 +505,141 @@ impl CodexResponsesSse {
         frame: &str,
         mut on_event: impl FnMut(AgentStreamEvent) -> Result<()>,
     ) -> Result<()> {
-        let data = frame
-            .lines()
-            .filter_map(|line| line.strip_prefix("data:"))
-            .map(str::trim_start)
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        if data.is_empty() || data == "[DONE]" {
-            return Ok(());
-        }
-
-        let Ok(value) = serde_json::from_str::<Value>(&data) else {
+        let Some(data) = sse_frame_data(frame) else {
             return Ok(());
         };
 
-        for event in codex_responses_events(&value) {
-            if let AgentStreamEvent::AssistantText(text) = &event {
+        let Ok(event) = serde_json::from_str::<CodexResponseEvent>(&data) else {
+            return Ok(());
+        };
+
+        for stream_event in codex_responses_events(&event) {
+            if let AgentStreamEvent::AssistantText(text) = &stream_event {
                 self.agent_text.push_str(text);
             }
-            on_event(event)?;
+            on_event(stream_event)?;
         }
-        if let Some(tool_call) = codex_tool_call(&value) {
+        if let Some(tool_call) = codex_tool_call(&event) {
             self.tool_calls.push(tool_call);
         }
         Ok(())
     }
 }
 
-fn codex_tool_call(value: &Value) -> Option<CodexToolCall> {
-    if value.get("type").and_then(Value::as_str)? != "response.output_item.done" {
+fn sse_frame_data(frame: &str) -> Option<String> {
+    let mut data = String::new();
+    for line in frame.lines().filter_map(|line| line.strip_prefix("data:")) {
+        if !data.is_empty() {
+            data.push('\n');
+        }
+        data.push_str(line.trim_start());
+    }
+
+    (!data.is_empty() && data != "[DONE]").then_some(data)
+}
+
+#[derive(Debug, Deserialize)]
+struct CodexResponseEvent {
+    #[serde(rename = "type")]
+    kind: String,
+    delta: Option<String>,
+    response: Option<CodexResponseEnvelope>,
+    item: Option<CodexResponseItem>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CodexResponseEnvelope {
+    usage: Option<CodexResponseUsage>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type")]
+enum CodexResponseItem {
+    #[serde(rename = "function_call")]
+    FunctionCall {
+        call_id: String,
+        name: String,
+        arguments: String,
+    },
+    #[serde(other)]
+    Other,
+}
+
+#[derive(Debug, Deserialize)]
+struct CodexResponseUsage {
+    input_tokens: i64,
+    input_tokens_details: Option<CodexInputTokenDetails>,
+    output_tokens: i64,
+    output_tokens_details: Option<CodexOutputTokenDetails>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CodexInputTokenDetails {
+    cached_tokens: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CodexOutputTokenDetails {
+    reasoning_tokens: Option<i64>,
+}
+
+impl From<&CodexResponseUsage> for AgentStreamEvent {
+    fn from(usage: &CodexResponseUsage) -> Self {
+        Self::Usage(TokenUsage {
+            input_tokens: usage.input_tokens,
+            cached_input_tokens: usage
+                .input_tokens_details
+                .as_ref()
+                .and_then(|details| details.cached_tokens),
+            output_tokens: usage.output_tokens,
+            reasoning_output_tokens: usage
+                .output_tokens_details
+                .as_ref()
+                .and_then(|details| details.reasoning_tokens),
+        })
+    }
+}
+
+fn codex_tool_call(event: &CodexResponseEvent) -> Option<CodexToolCall> {
+    if event.kind != "response.output_item.done" {
         return None;
     }
 
-    let item = value.get("item")?;
-    if item.get("type").and_then(Value::as_str)? != "function_call" {
+    let CodexResponseItem::FunctionCall {
+        call_id,
+        name,
+        arguments,
+    } = event.item.as_ref()?
+    else {
         return None;
-    }
+    };
 
     Some(CodexToolCall {
-        call_id: item.get("call_id")?.as_str()?.to_owned(),
-        name: item.get("name")?.as_str()?.to_owned(),
-        arguments: item.get("arguments")?.as_str()?.to_owned(),
+        call_id: call_id.clone(),
+        name: name.clone(),
+        arguments: arguments.clone(),
     })
 }
 
-fn codex_responses_events(value: &Value) -> Vec<AgentStreamEvent> {
-    match value.get("type").and_then(Value::as_str) {
-        Some("response.output_text.delta") => value
-            .get("delta")
-            .and_then(Value::as_str)
-            .map_or_else(Vec::new, |text| {
-                vec![AgentStreamEvent::assistant_text(text)]
-            }),
-        Some("response.output_item.added") => output_item_added_events(value),
-        Some("response.completed" | "response.done") => value
-            .get("response")
-            .and_then(|response| response.get("usage"))
-            .and_then(usage_event)
+fn codex_responses_events(event: &CodexResponseEvent) -> Vec<AgentStreamEvent> {
+    match event.kind.as_str() {
+        "response.output_text.delta" => event.delta.as_ref().map_or_else(Vec::new, |text| {
+            vec![AgentStreamEvent::assistant_text(text.as_str())]
+        }),
+        "response.output_item.added" => output_item_added_events(event),
+        "response.completed" | "response.done" => event
+            .response
+            .as_ref()
+            .and_then(|response| response.usage.as_ref())
+            .map(AgentStreamEvent::from)
             .into_iter()
             .collect(),
         _ => Vec::new(),
     }
 }
 
-fn output_item_added_events(_value: &Value) -> Vec<AgentStreamEvent> {
+fn output_item_added_events(_event: &CodexResponseEvent) -> Vec<AgentStreamEvent> {
     Vec::new()
-}
-
-fn usage_event(usage: &Value) -> Option<AgentStreamEvent> {
-    let input = usage.get("input_tokens").and_then(Value::as_i64)?;
-    let output = usage.get("output_tokens").and_then(Value::as_i64)?;
-    Some(AgentStreamEvent::Usage(TokenUsage {
-        input_tokens: input,
-        cached_input_tokens: usage
-            .get("input_tokens_details")
-            .and_then(|details| details.get("cached_tokens"))
-            .and_then(Value::as_i64),
-        output_tokens: output,
-        reasoning_output_tokens: usage
-            .get("output_tokens_details")
-            .and_then(|details| details.get("reasoning_tokens"))
-            .and_then(Value::as_i64),
-    }))
 }
 
 #[cfg(test)]
@@ -627,11 +653,12 @@ mod tests {
         thread,
     };
 
+    use base64::Engine as _;
     use serde_json::Value;
     use tempfile::tempdir;
 
     use super::{
-        CodexResponsesSse, CodexSubscriptionProvider, base64_url_decode, codex_request_body,
+        BASE64_URL, CodexResponsesSse, CodexSubscriptionProvider, codex_request_body,
         initial_input, parse_account_id_from_jwt,
     };
     use crate::{
@@ -868,7 +895,9 @@ mod tests {
             Some("acc-nested".to_owned())
         );
         assert_eq!(
-            base64_url_decode(&base64_url_no_pad(b"hello")).expect("decode"),
+            BASE64_URL
+                .decode(base64_url_no_pad(b"hello"))
+                .expect("decode"),
             b"hello"
         );
     }
@@ -950,23 +979,6 @@ mod tests {
     }
 
     fn base64_url_no_pad(input: &[u8]) -> String {
-        const TABLE: &[u8; 64] =
-            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-        let mut output = String::new();
-        for chunk in input.chunks(3) {
-            let b0 = u32::from(chunk[0]);
-            let b1 = u32::from(*chunk.get(1).unwrap_or(&0));
-            let b2 = u32::from(*chunk.get(2).unwrap_or(&0));
-            let combined = (b0 << 16) | (b1 << 8) | b2;
-            output.push(TABLE[((combined >> 18) & 0x3f) as usize] as char);
-            output.push(TABLE[((combined >> 12) & 0x3f) as usize] as char);
-            if chunk.len() > 1 {
-                output.push(TABLE[((combined >> 6) & 0x3f) as usize] as char);
-            }
-            if chunk.len() > 2 {
-                output.push(TABLE[(combined & 0x3f) as usize] as char);
-            }
-        }
-        output
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(input)
     }
 }

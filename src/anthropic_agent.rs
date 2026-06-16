@@ -1,10 +1,12 @@
 use std::{
     fs,
+    hash::Hasher,
     io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
 };
 
+use fnv::FnvHasher;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -284,12 +286,9 @@ fn executable_name(name: &str) -> String {
 }
 
 fn fnv1a64(bytes: &[u8]) -> u64 {
-    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
-    for byte in bytes {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x0100_0000_01b3);
-    }
-    hash
+    let mut hasher = FnvHasher::default();
+    hasher.write(bytes);
+    hasher.finish()
 }
 
 #[cfg(unix)]

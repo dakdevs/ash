@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
 
+use globset::Glob;
+
 use crate::error::{AshError, Result};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,41 +91,9 @@ impl PermissionSet {
 }
 
 fn wildcard_matches(pattern: &str, input: &str) -> bool {
-    if pattern == "*" {
-        return true;
-    }
-
-    let pattern = pattern.as_bytes();
-    let input = input.as_bytes();
-    let mut pattern_index = 0;
-    let mut input_index = 0;
-    let mut star_index = None;
-    let mut star_match_index = 0;
-
-    while input_index < input.len() {
-        if pattern_index < pattern.len()
-            && (pattern[pattern_index] == input[input_index] || pattern[pattern_index] == b'?')
-        {
-            pattern_index += 1;
-            input_index += 1;
-        } else if pattern_index < pattern.len() && pattern[pattern_index] == b'*' {
-            star_index = Some(pattern_index);
-            star_match_index = input_index;
-            pattern_index += 1;
-        } else if let Some(star) = star_index {
-            pattern_index = star + 1;
-            star_match_index += 1;
-            input_index = star_match_index;
-        } else {
-            return false;
-        }
-    }
-
-    while pattern_index < pattern.len() && pattern[pattern_index] == b'*' {
-        pattern_index += 1;
-    }
-
-    pattern_index == pattern.len()
+    Glob::new(pattern)
+        .map(|glob| glob.compile_matcher().is_match(input))
+        .unwrap_or(false)
 }
 
 #[cfg(test)]
