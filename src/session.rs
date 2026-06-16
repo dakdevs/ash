@@ -95,6 +95,14 @@ where
         })
     }
 
+    pub fn prompt_status_line(&self) -> String {
+        self.statusline.render_prompt_line(&StatusLineContext {
+            mode: self.mode,
+            provider: &self.config.default_provider,
+            cwd: self.shell.cwd(),
+        })
+    }
+
     pub fn toggle_mode(&mut self) -> Result<SessionResponse> {
         self.mode = match self.mode {
             PromptMode::Agent => PromptMode::Command,
@@ -275,6 +283,24 @@ mod tests {
 
         assert!(status.starts_with("[ash mode=> provider=codex "));
         assert!(status.contains(&format!("pwd={}", cwd.display())));
+    }
+
+    #[test]
+    fn prompt_status_line_is_available_for_the_preprompt_row() {
+        let session = AshSession::new(
+            AshConfig::default(),
+            InMemoryContextStore::default(),
+            EchoAgent,
+            std::path::PathBuf::from("/tmp/project"),
+        );
+
+        let status = session.prompt_status_line();
+
+        assert!(status.contains("ASH"));
+        assert!(status.contains("mode "));
+        assert!(status.contains("provider "));
+        assert!(status.contains("pwd "));
+        assert!(status.ends_with("\x1b[0m"));
     }
 
     #[test]

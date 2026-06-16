@@ -79,6 +79,34 @@ impl StatusLine {
             .collect::<Vec<_>>()
             .join(" ")
     }
+
+    #[must_use]
+    pub fn render_prompt_line(&self, context: &StatusLineContext<'_>) -> String {
+        let mut segments = vec![
+            StatusSegment::new("mode", context.mode.prompt()),
+            StatusSegment::new("provider", context.provider),
+        ];
+        segments.extend(
+            self.plugins
+                .iter()
+                .filter_map(|plugin| plugin.segment(context)),
+        );
+        styled_statusline(&segments)
+    }
+}
+
+fn styled_statusline(segments: &[StatusSegment]) -> String {
+    let mut line = String::from("\x1b[48;2;18;22;28m\x1b[38;2;126;203;255m ASH ");
+    for segment in segments {
+        line.push_str("\x1b[38;2;104;114;133m | ");
+        line.push_str("\x1b[38;2;137;148;168m");
+        line.push_str(&segment.name);
+        line.push(' ');
+        line.push_str("\x1b[38;2;231;236;244m");
+        line.push_str(&segment.value);
+    }
+    line.push_str(" \x1b[0m");
+    line
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -266,6 +294,24 @@ mod tests {
         assert_eq!(
             statusline.render(&context),
             "mode=> provider=codex pwd=/tmp/project git=main clean"
+        );
+    }
+
+    #[test]
+    fn prompt_statusline_is_styled_for_the_input_preprompt_row() {
+        let statusline = StatusLine::from_plugins(vec![Box::new(StaticStatusPlugin::new(
+            "pwd",
+            "/tmp/project",
+        ))]);
+        let context = StatusLineContext {
+            mode: PromptMode::Agent,
+            provider: "codex",
+            cwd: std::path::Path::new("/tmp/project"),
+        };
+
+        assert_eq!(
+            statusline.render_prompt_line(&context),
+            "\x1b[48;2;18;22;28m\x1b[38;2;126;203;255m ASH \x1b[38;2;104;114;133m | \x1b[38;2;137;148;168mmode \x1b[38;2;231;236;244m>\x1b[38;2;104;114;133m | \x1b[38;2;137;148;168mprovider \x1b[38;2;231;236;244mcodex\x1b[38;2;104;114;133m | \x1b[38;2;137;148;168mpwd \x1b[38;2;231;236;244m/tmp/project \x1b[0m"
         );
     }
 

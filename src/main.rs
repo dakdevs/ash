@@ -329,7 +329,7 @@ where
     A: ash::agent::Agent,
 {
     let mode = Arc::new(Mutex::new(session.mode()));
-    let status = Arc::new(Mutex::new(session.status_segments()));
+    let status = Arc::new(Mutex::new(session.prompt_status_line()));
     let mut line_editor = ash_line_editor();
     let prompt = AshPrompt::new(Arc::clone(&mode), Arc::clone(&status));
     let commands = discover_shell_commands();
@@ -338,7 +338,7 @@ where
 
     loop {
         set_shared_mode(&mode, session.mode());
-        set_shared_status(&status, session.status_segments());
+        set_shared_status(&status, session.prompt_status_line());
         restore_reedline_buffer(&mut line_editor, &mut next_buffer);
         match line_editor.read_line(&prompt)? {
             Signal::Success(line) => {
@@ -514,11 +514,11 @@ impl AshPrompt {
 
 impl Prompt for AshPrompt {
     fn render_prompt_left(&self) -> Cow<'_, str> {
-        Cow::Borrowed("")
+        Cow::Owned(format!("{}\n", shared_status(&self.status)))
     }
 
     fn render_prompt_right(&self) -> Cow<'_, str> {
-        Cow::Owned(shared_status(&self.status))
+        Cow::Borrowed("")
     }
 
     fn render_prompt_indicator(&self, _prompt_mode: PromptEditMode) -> Cow<'_, str> {
@@ -736,7 +736,12 @@ mod tests {
         KeyCode as TerminalKeyCode, KeyEvent, KeyModifiers as TerminalKeyModifiers,
     };
 
-    use super::{completion_replacement, escape_confirmation_decision, shell_suggestions};
+    use reedline::{Prompt, PromptEditMode};
+
+    use super::{
+        AshPrompt, PromptMode, completion_replacement, escape_confirmation_decision,
+        shell_suggestions,
+    };
 
     #[test]
     fn command_completion_replaces_the_current_command_token() {
@@ -821,6 +826,21 @@ mod tests {
                 TerminalKeyModifiers::NONE,
             )),
             None
+        );
+    }
+
+    #[test]
+    fn ash_prompt_renders_statusline_above_input_indicator() {
+        let prompt = AshPrompt::new(
+            std::sync::Arc::new(std::sync::Mutex::new(PromptMode::Agent)),
+            std::sync::Arc::new(std::sync::Mutex::new("status".to_owned())),
+        );
+
+        assert_eq!(prompt.render_prompt_left(), "status\n");
+        assert_eq!(prompt.render_prompt_right(), "");
+        assert_eq!(
+            prompt.render_prompt_indicator(PromptEditMode::Default),
+            "> "
         );
     }
 }
