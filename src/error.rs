@@ -25,6 +25,21 @@ pub enum AshError {
     #[error("codex executable was not found")]
     CodexNotFound,
 
+    #[error("codex authentication has expired")]
+    CodexAuthExpired,
+
+    #[error("agent request was cancelled")]
+    AgentCancelled,
+
+    #[error("provider transport error: {0}")]
+    ProviderTransport(String),
+
+    #[error("http error: {0}")]
+    Http(#[from] reqwest::Error),
+
+    #[error("json error: {0}")]
+    Json(#[from] serde_json::Error),
+
     #[error("process `{program}` failed to start: {source}")]
     ProcessSpawn {
         program: String,

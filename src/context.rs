@@ -59,6 +59,8 @@ impl ContextEvent {
 
 pub trait ContextStore {
     fn record(&mut self, event: ContextEvent) -> Result<()>;
+
+    fn recent(&self, limit: usize) -> Result<Vec<ContextEvent>>;
 }
 
 #[derive(Debug, Default)]
@@ -77,6 +79,11 @@ impl ContextStore for InMemoryContextStore {
     fn record(&mut self, event: ContextEvent) -> Result<()> {
         self.events.push(event);
         Ok(())
+    }
+
+    fn recent(&self, limit: usize) -> Result<Vec<ContextEvent>> {
+        let start = self.events.len().saturating_sub(limit);
+        Ok(self.events[start..].to_vec())
     }
 }
 
@@ -135,6 +142,21 @@ impl ContextStore for SqliteContextStore {
 
         Ok(())
     }
+
+    fn recent(&self, limit: usize) -> Result<Vec<ContextEvent>> {
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let mut connection = self.connection.borrow_mut();
+        let mut events = context_events::table
+            .select((context_events::kind, context_events::body))
+            .order(context_events::id.desc())
+            .limit(limit)
+            .load::<(String, String)>(&mut *connection)?
+            .into_iter()
+            .map(|(kind, body)| ContextEvent { kind, body })
+            .collect::<Vec<_>>();
+        events.reverse();
+        Ok(events)
+    }
 }
 
 #[derive(Debug, Insertable)]
@@ -150,7 +172,30 @@ mod tests {
     use diesel::{Connection, connection::SimpleConnection, sqlite::SqliteConnection};
     use tempfile::tempdir;
 
-    use super::{ContextEvent, ContextStore, SqliteContextStore};
+    use super::{ContextEvent, ContextStore, InMemoryContextStore, SqliteContextStore};
+
+    #[test]
+    fn in_memory_store_returns_recent_events_in_original_order() {
+        let mut store = InMemoryContextStore::default();
+
+        store
+            .record(ContextEvent::agent_prompt("one"))
+            .expect("one");
+        store
+            .record(ContextEvent::agent_prompt("two"))
+            .expect("two");
+        store
+            .record(ContextEvent::agent_prompt("three"))
+            .expect("three");
+
+        assert_eq!(
+            store.recent(2).expect("recent"),
+            vec![
+                ContextEvent::agent_prompt("two"),
+                ContextEvent::agent_prompt("three"),
+            ]
+        );
+    }
 
     #[test]
     fn sqlite_store_records_events() {
@@ -163,6 +208,31 @@ mod tests {
             .expect("record");
 
         assert_eq!(store.count().expect("count"), 1);
+    }
+
+    #[test]
+    fn sqlite_store_returns_recent_events_in_original_order() {
+        let dir = tempdir().expect("tempdir");
+        let db = dir.path().join("ash.db");
+        let mut store = SqliteContextStore::open(&db).expect("store");
+
+        store
+            .record(ContextEvent::agent_prompt("one"))
+            .expect("one");
+        store
+            .record(ContextEvent::agent_prompt("two"))
+            .expect("two");
+        store
+            .record(ContextEvent::agent_prompt("three"))
+            .expect("three");
+
+        assert_eq!(
+            store.recent(2).expect("recent"),
+            vec![
+                ContextEvent::agent_prompt("two"),
+                ContextEvent::agent_prompt("three"),
+            ]
+        );
     }
 
     #[test]

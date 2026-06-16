@@ -65,6 +65,13 @@ impl PluginManifest {
             capabilities: capabilities.to_vec(),
         }
     }
+
+    #[must_use]
+    pub fn provides_statusline(&self) -> bool {
+        self.capabilities
+            .iter()
+            .any(|capability| capability == "statusline")
+    }
 }
 
 #[derive(Debug, Default)]
@@ -82,6 +89,14 @@ impl PluginRegistry {
     pub fn manifests(&self) -> &[PluginManifest] {
         &self.manifests
     }
+
+    #[must_use]
+    pub fn statusline_manifests(&self) -> Vec<&PluginManifest> {
+        self.manifests
+            .iter()
+            .filter(|manifest| manifest.provides_statusline())
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,4 +104,33 @@ pub enum PluginEvent {
     CommandExecuted { command: String, status: i32 },
     AgentPrompt { prompt: String },
     SessionCompacted,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PluginKind, PluginManifest, PluginRegistry, PluginSource};
+
+    #[test]
+    fn registry_finds_plugins_with_statusline_capability() {
+        let manifests = vec![
+            PluginManifest::new(
+                "prompt",
+                PluginKind::Wasm,
+                PluginSource::Registry("prompt".to_owned()),
+                &["ui".to_owned()],
+            ),
+            PluginManifest::new(
+                "gitline",
+                PluginKind::Process,
+                PluginSource::Registry("gitline".to_owned()),
+                &["statusline".to_owned()],
+            ),
+        ];
+        let registry = PluginRegistry::from_manifests(manifests);
+
+        let statusline = registry.statusline_manifests();
+
+        assert_eq!(statusline.len(), 1);
+        assert_eq!(statusline[0].name, "gitline");
+    }
 }

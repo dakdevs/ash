@@ -13,6 +13,7 @@ Current milestone:
 - `>` agent mode and `$` command mode.
 - Empty-line Tab input (`\t`) toggles modes.
 - Native simple command execution without delegating to another shell.
+- Native plugin-shaped statusline segments for pwd, git status, Node version, Rust version, and battery.
 - `.ashrc` startup declarations for modes, providers, plugins, and permissions.
 - Local SQLite context logging through Diesel typed queries and embedded migrations.
 - Provider, plugin, permission, parser, evaluator, and session boundaries.
@@ -91,7 +92,10 @@ set command_mode persistent
 provider default codex
 permission bash "git status*" allow
 plugin wasm prompt ~/.config/ash/plugins/prompt.wasm ui prompt
+plugin process my-statusline ~/.config/ash/plugins/statusline statusline
 ```
+
+The interactive prompt renders a native right-side statusline. Built-in statusline segments include `pwd`, `git`, `node`, `rust`, and `battery`; plugins can declare the `statusline` capability to contribute future external segments through the plugin runtime.
 
 ### AI Connector Setup
 
