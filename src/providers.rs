@@ -6,7 +6,7 @@ use std::{
     thread,
 };
 
-use serde_json::Value;
+use serde::Deserialize;
 
 use crate::{
     anthropic_agent::AnthropicAgentProvider,
@@ -546,97 +546,154 @@ impl CodexJsonStream {
 }
 
 fn codex_stream_line_events(line: &str) -> Vec<AgentStreamEvent> {
-    let Ok(value) = serde_json::from_str(line) else {
+    let Ok(event) = serde_json::from_str::<CodexCliEvent>(line) else {
         return Vec::new();
     };
-    if let Some(event) = codex_json_rpc_delta_event(&value) {
-        return vec![event];
-    }
 
-    match value.get("type").and_then(Value::as_str) {
-        Some("turn.started") => vec![AgentStreamEvent::Status("started".to_owned())],
-        Some("agent_message.delta" | "item.agent_message.delta") => value
-            .get("delta")
-            .or_else(|| value.get("text"))
-            .and_then(Value::as_str)
-            .map_or_else(Vec::new, |text| {
+    match event {
+        CodexCliEvent::JsonRpc { method, params } => match method.as_str() {
+            "item/agentMessage/delta" => params.text().map_or_else(Vec::new, |text| {
                 vec![AgentStreamEvent::assistant_text(text)]
             }),
-        Some("item.started") => value
-            .get("item")
+            _ => Vec::new(),
+        },
+        CodexCliEvent::Typed {
+            kind,
+            delta,
+            text,
+            item,
+            usage,
+        } => codex_typed_stream_events(&kind, delta, text, item, usage),
+    }
+}
+
+fn codex_typed_stream_events(
+    kind: &str,
+    delta: Option<String>,
+    text: Option<String>,
+    item: Option<CodexCliItem>,
+    usage: Option<CodexCliUsage>,
+) -> Vec<AgentStreamEvent> {
+    match kind {
+        "turn.started" => vec![AgentStreamEvent::Status("started".to_owned())],
+        "agent_message.delta" | "item.agent_message.delta" => {
+            delta.or(text).map_or_else(Vec::new, |text| {
+                vec![AgentStreamEvent::assistant_text(text)]
+            })
+        }
+        "item.started" => item
             .and_then(codex_item_started_chunk)
             .into_iter()
             .collect(),
-        Some("item.completed") => value
-            .get("item")
-            .map_or_else(Vec::new, codex_item_completed_chunks),
-        Some("turn.completed") => value
-            .get("usage")
-            .and_then(codex_turn_completed_chunk)
-            .into_iter()
-            .collect(),
+        "item.completed" => item.map_or_else(Vec::new, codex_item_completed_chunks),
+        "turn.completed" => usage.map(AgentStreamEvent::from).into_iter().collect(),
         _ => Vec::new(),
     }
 }
 
-fn codex_json_rpc_delta_event(value: &Value) -> Option<AgentStreamEvent> {
-    match value.get("method")?.as_str()? {
-        "item/agentMessage/delta" => value
-            .get("params")
-            .and_then(|params| params.get("delta").or_else(|| params.get("text")))
-            .and_then(Value::as_str)
-            .map(AgentStreamEvent::assistant_text),
-        _ => None,
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum CodexCliEvent {
+    JsonRpc {
+        method: String,
+        params: CodexCliDelta,
+    },
+    Typed {
+        #[serde(rename = "type")]
+        kind: String,
+        delta: Option<String>,
+        text: Option<String>,
+        item: Option<CodexCliItem>,
+        usage: Option<CodexCliUsage>,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+struct CodexCliDelta {
+    delta: Option<String>,
+    text: Option<String>,
+}
+
+impl CodexCliDelta {
+    fn text(self) -> Option<String> {
+        self.delta.or(self.text)
     }
 }
 
-fn codex_item_started_chunk(item: &Value) -> Option<AgentStreamEvent> {
-    match item.get("type")?.as_str()? {
-        "command_execution" => {
-            let command = item.get("command")?.as_str()?;
-            Some(AgentStreamEvent::ToolStarted {
-                command: command.to_owned(),
-            })
-        }
-        _ => None,
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type")]
+enum CodexCliItem {
+    #[serde(rename = "agent_message")]
+    AgentMessage { text: String },
+    #[serde(rename = "command_execution")]
+    CommandExecution {
+        command: Option<String>,
+        aggregated_output: Option<String>,
+        exit_code: Option<i64>,
+    },
+    #[serde(other)]
+    Other,
+}
+
+fn codex_item_started_chunk(item: CodexCliItem) -> Option<AgentStreamEvent> {
+    match item {
+        CodexCliItem::CommandExecution {
+            command: Some(command),
+            ..
+        } => Some(AgentStreamEvent::ToolStarted { command }),
+        CodexCliItem::AgentMessage { .. }
+        | CodexCliItem::CommandExecution { .. }
+        | CodexCliItem::Other => None,
     }
 }
 
-fn codex_item_completed_chunks(item: &Value) -> Vec<AgentStreamEvent> {
-    match item.get("type").and_then(Value::as_str) {
-        Some("agent_message") => item
-            .get("text")
-            .and_then(Value::as_str)
-            .map_or_else(Vec::new, |text| {
-                vec![AgentStreamEvent::assistant_text(text)]
-            }),
-        Some("command_execution") => codex_command_completed_chunks(item),
-        _ => Vec::new(),
+fn codex_item_completed_chunks(item: CodexCliItem) -> Vec<AgentStreamEvent> {
+    match item {
+        CodexCliItem::AgentMessage { text } => vec![AgentStreamEvent::assistant_text(text)],
+        CodexCliItem::CommandExecution {
+            aggregated_output,
+            exit_code,
+            ..
+        } => codex_command_completed_chunks(aggregated_output, exit_code),
+        CodexCliItem::Other => Vec::new(),
     }
 }
 
-fn codex_command_completed_chunks(item: &Value) -> Vec<AgentStreamEvent> {
-    let mut events = Vec::new();
-    if let Some(output) = item.get("aggregated_output").and_then(Value::as_str)
-        && !output.trim().is_empty()
-    {
-        events.push(AgentStreamEvent::ToolOutput(output.to_owned()));
-    }
-
-    let exit_code = item.get("exit_code").and_then(Value::as_i64);
-    events.push(AgentStreamEvent::ToolCompleted { exit_code });
-    events
+fn codex_command_completed_chunks(
+    aggregated_output: Option<String>,
+    exit_code: Option<i64>,
+) -> Vec<AgentStreamEvent> {
+    aggregated_output
+        .filter(|output| !output.trim().is_empty())
+        .map(AgentStreamEvent::ToolOutput)
+        .into_iter()
+        .chain(std::iter::once(AgentStreamEvent::ToolCompleted {
+            exit_code,
+        }))
+        .collect()
 }
 
-fn codex_turn_completed_chunk(usage: &Value) -> Option<AgentStreamEvent> {
-    let input = usage.get("input_tokens").and_then(Value::as_i64)?;
-    let output = usage.get("output_tokens").and_then(Value::as_i64)?;
-    Some(AgentStreamEvent::Usage(TokenUsage {
-        input_tokens: input,
-        cached_input_tokens: usage.get("cached_input_tokens").and_then(Value::as_i64),
-        output_tokens: output,
-        reasoning_output_tokens: usage.get("reasoning_output_tokens").and_then(Value::as_i64),
-    }))
+#[derive(Debug, Deserialize)]
+struct CodexCliUsage {
+    #[serde(rename = "input_tokens")]
+    input: i64,
+    #[serde(rename = "cached_input_tokens")]
+    cached_input: Option<i64>,
+    #[serde(rename = "output_tokens")]
+    output: i64,
+    #[serde(rename = "reasoning_output_tokens")]
+    reasoning_output: Option<i64>,
+}
+
+impl From<CodexCliUsage> for AgentStreamEvent {
+    fn from(usage: CodexCliUsage) -> Self {
+        Self::Usage(TokenUsage {
+            input_tokens: usage.input,
+            cached_input_tokens: usage.cached_input,
+            output_tokens: usage.output,
+            reasoning_output_tokens: usage.reasoning_output,
+        })
+    }
 }
 
 fn codex_response_text(stdout: &str, stderr: &str) -> String {
